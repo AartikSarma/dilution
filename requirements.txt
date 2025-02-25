@@ -1,0 +1,9 @@
+numpy
+pandas
+scipy
+scikit-learn>=1.0.0
+matplotlib
+seaborn
+plotly>=5.0.0
+streamlit>=1.15.0
+tqdm
