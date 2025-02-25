@@ -75,7 +75,8 @@ def plot_interactive_dilution_effect(dataset):
                 colorbar=dict(title="Dilution Factor"),
                 showscale=True
             ),
-            hovertemplate="True: %{x:.2f}<br>Observed: %{y:.2f}<br>Dilution: %{marker.color:.2f}"
+            hovertemplate="True: %{x:.2f}<br>Observed: %{y:.2f}<br>Dilution: %{marker.color:.2f}",
+            showlegend=False  # Remove the "trace 0" from legend
         ),
         row=1, col=1
     )
@@ -88,7 +89,7 @@ def plot_interactive_dilution_effect(dataset):
             y=[0, max_val],
             mode='lines',
             line=dict(color='red', dash='dash'),
-            showlegend=False
+            showlegend=False  # Remove the "trace 2" from legend
         ),
         row=1, col=1
     )
@@ -98,7 +99,8 @@ def plot_interactive_dilution_effect(dataset):
         go.Histogram(
             x=dilution_factors,
             nbinsx=30,
-            marker_color='rgba(0, 0, 255, 0.5)'
+            marker_color='rgba(0, 0, 255, 0.5)',
+            showlegend=False  # Ensure no legend entry for histogram
         ),
         row=1, col=2
     )
@@ -325,7 +327,7 @@ def interactive_simulation_app():
     st.sidebar.header("Simulation Parameters")
     
     # Sample parameters
-    n_subjects = st.sidebar.slider("Number of Subjects", 20, 500, 100)
+    n_subjects = st.sidebar.slider("Number of Subjects", 20, 200, 100)  # 2. Limit max to 200
     n_groups = st.sidebar.slider("Number of Groups", 2, 5, 2)
     n_biomarkers = st.sidebar.slider("Number of Biomarkers", 3, 100, 10)
     
@@ -334,21 +336,25 @@ def interactive_simulation_app():
     correlation_type = st.sidebar.selectbox(
         "Correlation Type",
         ["none", "low", "moderate", "high", "block"],
-        index=2
+        index=2,
+        help="Defines how biomarkers correlate with each other: none (uncorrelated), low (~0.2), moderate (~0.5), high (~0.8), or block (groups of related biomarkers)"
     )
     
     block_size = None
     if correlation_type == "block":
-        block_size = st.sidebar.slider("Block Size", 2, min(10, n_biomarkers), 3)
+        block_size = st.sidebar.slider("Block Size", 2, min(10, n_biomarkers), 3, 
+                                      help="Number of biomarkers in each correlated block")
     
     # Effect size
-    effect_size = st.sidebar.slider("Effect Size", 0.1, 2.0, 0.8)
+    effect_size = st.sidebar.slider("Effect Size", 0.1, 1.0, 0.8,  # 1. Limit effect size to 0-1
+                                   help="Magnitude of difference between groups (higher values = more distinct groups)")
     
     # Distribution
     distribution = st.sidebar.selectbox(
         "Biomarker Distribution",
         ["normal", "lognormal", "mixed"],
-        index=1
+        index=1,
+        help="Underlying distribution of biomarker concentrations: normal (symmetric), lognormal (right-skewed, common in biological data), or mixed"
     )
     
     # Dilution parameters
@@ -356,29 +362,36 @@ def interactive_simulation_app():
     dilution_severity = st.sidebar.selectbox(
         "Dilution Severity",
         ["Mild", "Moderate", "Severe"],
-        index=1
+        index=1,
+        help="Controls the dilution distribution: Mild (less variable, mostly concentrated), Moderate (middle range), Severe (highly variable, more diluted samples)"
     )
     
-    # Set alpha/beta based on severity
+    # Set alpha/beta based on severity with explanation
     if dilution_severity == "Mild":
         dilution_alpha, dilution_beta = 8.0, 2.0
+        dilution_explanation = "Mild: Less variable dilution, samples mostly concentrated (Beta(8,2) distribution)"
     elif dilution_severity == "Moderate":
         dilution_alpha, dilution_beta = 5.0, 5.0
+        dilution_explanation = "Moderate: Balanced dilution, centered around 0.5 (Beta(5,5) distribution)"
     else:  # Severe
         dilution_alpha, dilution_beta = 2.0, 8.0
+        dilution_explanation = "Severe: Highly variable dilution, more diluted samples (Beta(2,8) distribution)"
+    
+    st.sidebar.info(dilution_explanation)
     
     # LOD parameters
     st.sidebar.subheader("Limit of Detection")
     lod_percentile = st.sidebar.slider(
         "LOD Percentile",
         0.0, 0.5, 0.1,
-        help="Fraction of true values below LOD"
+        help="Fraction of true values below the limit of detection (LOD)"
     )
     
     lod_handling = st.sidebar.selectbox(
         "LOD Handling Method",
         ["substitute", "zero", "min"],
-        index=0
+        index=0,
+        help="How to handle values below LOD: substitute (LOD/√2, standard approach), zero (set to zero), or min (use minimum observed value)"
     )
     
     # Build parameter dictionary
@@ -435,6 +448,19 @@ def interactive_simulation_app():
         with tab2:
             st.header("Comparing Normalization Methods")
             
+            # Add descriptions of normalization methods
+            st.markdown("""
+            ### Normalization Methods Explained
+            
+            - **True**: The original, undiluted biomarker concentrations (not available in real experiments)
+            - **Raw (Diluted)**: The observed data with dilution effects (what you would actually measure)
+            - **Total Sum**: Converts values to relative abundances (each sample sums to 1)
+            - **PQN (Probabilistic Quotient Normalization)**: Uses a reference spectrum and median of quotients for scaling
+            - **CLR (Centered Log-Ratio)**: Log-ratio transformation that preserves relative relationships in compositional data
+            - **Reference**: Normalizes using a reference biomarker (similar to using creatinine in urine or albumin in serum)
+            - **Quantile**: Forces all samples to have identical distributions
+            """)
+            
             # Apply various normalizations
             X_true = dataset['X_true']
             X_obs = dataset['X_obs']
@@ -479,11 +505,12 @@ def interactive_simulation_app():
             fig_performance = plot_performance_comparison(results)
             st.plotly_chart(fig_performance, use_container_width=True)
             
-            # Interpretations
+            # Interpretations with added explanation about false positives
             st.markdown("""
             **Metric Definitions:**
             - **Statistical Power**: Ability to detect true differences between groups (higher is better)
             - **Type I Error Rate**: Rate of false positives (should be ≤ 0.05)
+              - *In this context, a false positive means finding a "significant" difference between groups for a biomarker where no real biological difference exists. This can happen when dilution effects create artificial patterns in the data.*
             - **Correlation Recovery**: How well the method recovers true correlation structure (higher is better)
             - **PCA Subspace Recovery**: Similarity between true and recovered principal component subspaces (higher is better)
             - **Clustering Performance**: Agreement between true groups and clustering results (higher is better)
