@@ -8,12 +8,11 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import altair as alt
 
 # Import simulation functions
-# Assuming the core simulation module is imported as follows:
 from biomarker_dilution_sim import *
 from visualization_module import *
+from data_io import SimulationConfig, ExperimentTracker, ReproducibilityManager
 
 # Set page config
 st.set_page_config(
@@ -25,26 +24,27 @@ st.set_page_config(
 
 # Define functions for the interactive app
 
-def run_interactive_simulation(params):
+def run_interactive_simulation(params, norm_methods=None):
     """
     Run a simulation with the given parameters and return results.
     """
     # Generate dataset
     dataset = generate_dataset(**params)
-    
+
     # Apply normalization methods
     X_true = dataset['X_true']
     X_obs = dataset['X_obs']
     y = dataset['y']
-    
-    norm_methods = [
-        'none', 'total_sum', 'pqn', 'clr', 'ilr', 
-        'reference', 'quantile'
-    ]
-    
+
+    if norm_methods is None:
+        norm_methods = [
+            'none', 'total_sum', 'pqn', 'clr', 'ilr',
+            'reference', 'quantile', 'median', 'vsn'
+        ]
+
     # Run analysis
     results = run_single_simulation(params, norm_methods)
-    
+
     return dataset, results
 
 
@@ -359,25 +359,45 @@ def interactive_simulation_app():
     
     # Dilution parameters
     st.sidebar.subheader("Dilution Parameters")
-    dilution_severity = st.sidebar.selectbox(
-        "Dilution Severity",
-        ["Mild", "Moderate", "Severe"],
-        index=1,
-        help="Controls the dilution distribution: Mild (less variable, mostly concentrated), Moderate (middle range), Severe (highly variable, more diluted samples)"
+
+    dilution_model = st.sidebar.selectbox(
+        "Dilution Model",
+        ["beta", "gamma", "uniform", "bimodal", "mixture"],
+        index=0,
+        help="Distribution model for dilution factors"
     )
-    
-    # Set alpha/beta based on severity with explanation
-    if dilution_severity == "Mild":
-        dilution_alpha, dilution_beta = 8.0, 2.0
-        dilution_explanation = "Mild: Less variable dilution, samples mostly concentrated (Beta(8,2) distribution)"
-    elif dilution_severity == "Moderate":
+
+    if dilution_model == "beta":
+        dilution_severity = st.sidebar.selectbox(
+            "Dilution Severity",
+            ["Mild", "Moderate", "Severe"],
+            index=1,
+            help="Controls the dilution distribution"
+        )
+
+        if dilution_severity == "Mild":
+            dilution_alpha, dilution_beta = 8.0, 2.0
+            dilution_explanation = "Mild: Less variable dilution, samples mostly concentrated (Beta(8,2) distribution)"
+        elif dilution_severity == "Moderate":
+            dilution_alpha, dilution_beta = 5.0, 5.0
+            dilution_explanation = "Moderate: Balanced dilution, centered around 0.5 (Beta(5,5) distribution)"
+        else:
+            dilution_alpha, dilution_beta = 2.0, 8.0
+            dilution_explanation = "Severe: Highly variable dilution, more diluted samples (Beta(2,8) distribution)"
+
+        st.sidebar.info(dilution_explanation)
+
+    elif dilution_model == "bimodal":
+        st.sidebar.info("Bimodal: Mix of good and poor quality samples")
+        dilution_alpha, dilution_beta = 5.0, 5.0  # Not used directly
+
+    elif dilution_model == "mixture":
+        st.sidebar.info("Mixture: Multiple sample quality populations")
         dilution_alpha, dilution_beta = 5.0, 5.0
-        dilution_explanation = "Moderate: Balanced dilution, centered around 0.5 (Beta(5,5) distribution)"
-    else:  # Severe
-        dilution_alpha, dilution_beta = 2.0, 8.0
-        dilution_explanation = "Severe: Highly variable dilution, more diluted samples (Beta(2,8) distribution)"
-    
-    st.sidebar.info(dilution_explanation)
+
+    else:
+        dilution_alpha, dilution_beta = 5.0, 5.0
+        st.sidebar.info(f"Using {dilution_model} distribution for dilution")
     
     # LOD parameters
     st.sidebar.subheader("Limit of Detection")
@@ -451,28 +471,39 @@ def interactive_simulation_app():
             # Add descriptions of normalization methods
             st.markdown("""
             ### Normalization Methods Explained
-            
+
+            **Basic Methods:**
             - **True**: The original, undiluted biomarker concentrations (not available in real experiments)
             - **Raw (Diluted)**: The observed data with dilution effects (what you would actually measure)
             - **Total Sum**: Converts values to relative abundances (each sample sums to 1)
+            - **Reference**: Normalizes using a reference biomarker (similar to using creatinine in urine)
+
+            **Advanced Methods:**
             - **PQN (Probabilistic Quotient Normalization)**: Uses a reference spectrum and median of quotients for scaling
-            - **CLR (Centered Log-Ratio)**: Log-ratio transformation that preserves relative relationships in compositional data
-            - **Reference**: Normalizes using a reference biomarker (similar to using creatinine in urine or albumin in serum)
+            - **CLR (Centered Log-Ratio)**: Log-ratio transformation for compositional data
             - **Quantile**: Forces all samples to have identical distributions
+            - **Median**: Scales each sample by its median value (robust to outliers)
+            - **VSN (Variance Stabilization)**: Stabilizes variance across the intensity range using asinh transformation
             """)
             
             # Apply various normalizations
             X_true = dataset['X_true']
             X_obs = dataset['X_obs']
-            
+
+            # Ensure positive values for normalization
+            X_obs_clean = X_obs.copy()
+            X_obs_clean[X_obs_clean <= 0] = np.min(X_obs_clean[X_obs_clean > 0]) / 10
+
             normalized_data = {
                 "True": X_true,
                 "Raw (Diluted)": X_obs,
-                "Total Sum": normalize_total_sum(X_obs),
-                "PQN": normalize_probabilistic_quotient(X_obs),
-                "CLR": centered_log_ratio(X_obs),
-                "Reference": normalize_reference_biomarker(X_obs, 0),
-                "Quantile": normalize_quantile(X_obs)
+                "Total Sum": normalize_total_sum(X_obs_clean),
+                "PQN": normalize_probabilistic_quotient(X_obs_clean),
+                "CLR": centered_log_ratio(X_obs_clean),
+                "Reference": normalize_reference_biomarker(X_obs_clean, 0),
+                "Quantile": normalize_quantile(X_obs_clean),
+                "Median": normalize_median(X_obs_clean),
+                "VSN": normalize_vsn(X_obs_clean)
             }
             
             # PCA visualization

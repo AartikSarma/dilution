@@ -237,12 +237,273 @@ def generate_true_biomarker_data(
 def generate_dilution_factors(
     n_subjects: int,
     alpha: float = 5.0,
-    beta: float = 5.0
+    beta: float = 5.0,
+    distribution: str = 'beta',
+    **kwargs
 ) -> np.ndarray:
     """
-    Generate dilution factors from a Beta distribution.
+    Generate dilution factors from various distributions.
+
+    Parameters:
+    -----------
+    n_subjects : int
+        Number of subjects
+    alpha : float
+        First shape parameter
+    beta : float
+        Second shape parameter
+    distribution : str
+        Distribution type: 'beta', 'gamma', 'uniform', 'truncated_normal',
+        'mixture', 'bimodal', 'sample_type'
+    **kwargs : dict
+        Additional distribution-specific parameters
+
+    Returns:
+    --------
+    np.ndarray
+        Dilution factors (0-1 range for most distributions)
     """
-    return np.random.beta(alpha, beta, size=n_subjects)
+    if distribution == 'beta':
+        # Standard Beta distribution
+        return np.random.beta(alpha, beta, size=n_subjects)
+
+    elif distribution == 'gamma':
+        # Gamma distribution (scaled to 0-1 range)
+        shape = kwargs.get('shape', alpha)
+        scale = kwargs.get('scale', 1.0 / beta)
+        factors = np.random.gamma(shape, scale, size=n_subjects)
+        # Normalize to 0-1 range
+        factors = factors / (factors.max() + 0.1)
+        return np.clip(factors, 0.01, 0.99)
+
+    elif distribution == 'uniform':
+        # Uniform distribution
+        low = kwargs.get('low', 0.2)
+        high = kwargs.get('high', 0.8)
+        return np.random.uniform(low, high, size=n_subjects)
+
+    elif distribution == 'truncated_normal':
+        # Truncated normal distribution
+        mean = kwargs.get('mean', 0.5)
+        std = kwargs.get('std', 0.15)
+        factors = np.random.normal(mean, std, size=n_subjects)
+        return np.clip(factors, 0.01, 0.99)
+
+    elif distribution == 'mixture':
+        # Mixture of distributions (simulates different sample quality)
+        n_components = kwargs.get('n_components', 2)
+        weights = kwargs.get('weights', None)
+
+        if weights is None:
+            weights = np.ones(n_components) / n_components
+
+        # Generate component assignments
+        components = np.random.choice(n_components, size=n_subjects, p=weights)
+
+        factors = np.zeros(n_subjects)
+        for c in range(n_components):
+            mask = components == c
+            n_c = np.sum(mask)
+            if n_c > 0:
+                # Each component has different parameters
+                alpha_c = alpha * (c + 1) / n_components
+                beta_c = beta * (n_components - c) / n_components
+                factors[mask] = np.random.beta(
+                    max(0.5, alpha_c), max(0.5, beta_c), size=n_c
+                )
+
+        return factors
+
+    elif distribution == 'bimodal':
+        # Bimodal distribution (good vs poor quality samples)
+        p_good = kwargs.get('p_good', 0.6)
+        good_params = kwargs.get('good_params', (8.0, 2.0))
+        poor_params = kwargs.get('poor_params', (2.0, 8.0))
+
+        is_good = np.random.random(n_subjects) < p_good
+        factors = np.zeros(n_subjects)
+        factors[is_good] = np.random.beta(good_params[0], good_params[1],
+                                          size=np.sum(is_good))
+        factors[~is_good] = np.random.beta(poor_params[0], poor_params[1],
+                                           size=np.sum(~is_good))
+        return factors
+
+    elif distribution == 'sample_type':
+        # Different dilution based on sample type
+        # (e.g., BAL vs tracheal aspirate vs sputum)
+        sample_types = kwargs.get('sample_types', None)
+        type_params = kwargs.get('type_params', {
+            'BAL': (3.0, 7.0),  # More diluted
+            'tracheal': (5.0, 5.0),  # Moderate
+            'sputum': (7.0, 3.0)  # Less diluted
+        })
+
+        if sample_types is None:
+            # Generate random sample types
+            types = list(type_params.keys())
+            sample_types = np.random.choice(types, size=n_subjects)
+
+        factors = np.zeros(n_subjects)
+        for stype, params in type_params.items():
+            mask = sample_types == stype
+            n_type = np.sum(mask)
+            if n_type > 0:
+                factors[mask] = np.random.beta(params[0], params[1], size=n_type)
+
+        return factors
+
+    else:
+        raise ValueError(f"Unknown dilution distribution: {distribution}")
+
+
+def generate_dilution_factors_time_dependent(
+    n_subjects: int,
+    n_timepoints: int,
+    base_alpha: float = 5.0,
+    base_beta: float = 5.0,
+    trend: str = 'none',
+    autocorrelation: float = 0.5
+) -> np.ndarray:
+    """
+    Generate time-dependent dilution factors for longitudinal studies.
+
+    Parameters:
+    -----------
+    n_subjects : int
+        Number of subjects
+    n_timepoints : int
+        Number of time points per subject
+    base_alpha, base_beta : float
+        Base Beta distribution parameters
+    trend : str
+        Temporal trend: 'none', 'increasing', 'decreasing', 'cyclic'
+    autocorrelation : float
+        Autocorrelation between consecutive time points (0-1)
+
+    Returns:
+    --------
+    np.ndarray
+        Dilution factors matrix (n_subjects x n_timepoints)
+    """
+    factors = np.zeros((n_subjects, n_timepoints))
+
+    for i in range(n_subjects):
+        # Generate base subject-level dilution tendency
+        subject_tendency = np.random.beta(base_alpha, base_beta)
+
+        for t in range(n_timepoints):
+            if t == 0:
+                # First time point
+                factors[i, t] = np.random.beta(base_alpha, base_beta)
+            else:
+                # Autocorrelated with previous time point
+                prev = factors[i, t - 1]
+                noise = np.random.beta(base_alpha, base_beta)
+                factors[i, t] = autocorrelation * prev + (1 - autocorrelation) * noise
+
+            # Apply trend
+            if trend == 'increasing':
+                # Dilution decreases over time (samples get more concentrated)
+                trend_factor = 1 + 0.1 * t / n_timepoints
+                factors[i, t] = min(0.99, factors[i, t] * trend_factor)
+
+            elif trend == 'decreasing':
+                # Dilution increases over time
+                trend_factor = 1 - 0.1 * t / n_timepoints
+                factors[i, t] = max(0.01, factors[i, t] * trend_factor)
+
+            elif trend == 'cyclic':
+                # Cyclic pattern (e.g., circadian)
+                cycle_effect = 0.1 * np.sin(2 * np.pi * t / n_timepoints)
+                factors[i, t] = np.clip(factors[i, t] + cycle_effect, 0.01, 0.99)
+
+    return factors
+
+
+def generate_dilution_factors_covariate_dependent(
+    n_subjects: int,
+    covariates: Dict[str, np.ndarray],
+    covariate_effects: Dict[str, float] = None,
+    base_alpha: float = 5.0,
+    base_beta: float = 5.0
+) -> np.ndarray:
+    """
+    Generate dilution factors that depend on sample/subject covariates.
+
+    Parameters:
+    -----------
+    n_subjects : int
+        Number of subjects
+    covariates : dict
+        Dictionary of covariate arrays (e.g., {'age': array, 'bmi': array})
+    covariate_effects : dict
+        Effect sizes for each covariate on dilution
+    base_alpha, base_beta : float
+        Base Beta distribution parameters
+
+    Returns:
+    --------
+    np.ndarray
+        Dilution factors
+    """
+    if covariate_effects is None:
+        covariate_effects = {k: 0.1 for k in covariates.keys()}
+
+    # Generate base dilution factors
+    base_factors = np.random.beta(base_alpha, base_beta, size=n_subjects)
+
+    # Apply covariate effects
+    linear_predictor = np.zeros(n_subjects)
+    for cov_name, cov_values in covariates.items():
+        # Standardize covariate
+        cov_std = (cov_values - np.mean(cov_values)) / (np.std(cov_values) + 1e-10)
+        effect = covariate_effects.get(cov_name, 0)
+        linear_predictor += effect * cov_std
+
+    # Transform to multiplicative effect
+    multiplier = np.exp(linear_predictor)
+    multiplier = multiplier / np.mean(multiplier)  # Normalize
+
+    # Apply to base factors
+    factors = base_factors * multiplier
+    factors = np.clip(factors, 0.01, 0.99)
+
+    return factors
+
+
+def simulate_batch_effects(
+    n_subjects: int,
+    n_batches: int,
+    batch_variability: float = 0.2
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Simulate batch effects on dilution factors.
+
+    Parameters:
+    -----------
+    n_subjects : int
+        Number of subjects
+    n_batches : int
+        Number of processing batches
+    batch_variability : float
+        Variability between batches (0-1)
+
+    Returns:
+    --------
+    Tuple[np.ndarray, np.ndarray]
+        (batch assignments, batch-specific dilution multipliers)
+    """
+    # Assign subjects to batches
+    batch_assignments = np.random.randint(0, n_batches, size=n_subjects)
+
+    # Generate batch-specific effects
+    batch_effects = 1 + np.random.normal(0, batch_variability, size=n_batches)
+    batch_effects = np.maximum(batch_effects, 0.5)  # Ensure positive
+
+    # Get effect for each subject
+    dilution_multipliers = batch_effects[batch_assignments]
+
+    return batch_assignments, dilution_multipliers
 
 
 def apply_dilution(
@@ -540,33 +801,381 @@ def normalize_quantile(X: np.ndarray) -> np.ndarray:
     ranks = np.zeros_like(X)
     for j in range(X.shape[1]):
         ranks[:, j] = stats.rankdata(X[:, j])
-    
+
     # Get means for each rank (across all columns)
     sorted_X = np.sort(X, axis=0)
     means = np.mean(sorted_X, axis=1)
-    
+
     # Create normalized data
     X_norm = np.zeros_like(X)
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             rank = int(ranks[i, j]) - 1  # ranks start at 1
             X_norm[i, j] = means[rank]
-    
+
+    return X_norm
+
+
+def normalize_median(X: np.ndarray) -> np.ndarray:
+    """
+    Median normalization scales each sample by its median value.
+
+    This is a simple but robust normalization method that divides each
+    sample's values by the sample's median, making samples comparable.
+    """
+    medians = np.median(X, axis=1, keepdims=True)
+    # Avoid division by zero
+    medians[medians == 0] = np.min(medians[medians > 0])
+    return X / medians
+
+
+def normalize_vsn(X: np.ndarray, max_iter: int = 100, tol: float = 1e-6) -> np.ndarray:
+    """
+    Variance Stabilization Normalization (VSN).
+
+    VSN uses a generalized log transformation (asinh) to stabilize variance
+    across the intensity range. This implementation uses an iterative approach
+    to estimate transformation parameters.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Input data matrix (samples x biomarkers)
+    max_iter : int
+        Maximum iterations for parameter estimation
+    tol : float
+        Convergence tolerance
+
+    Returns:
+    --------
+    np.ndarray
+        VSN-transformed data
+    """
+    n_samples, n_biomarkers = X.shape
+    X_positive = np.maximum(X, 1e-10)
+
+    # Initialize parameters
+    # Use robust estimates for initialization
+    mu = np.median(X_positive, axis=0)
+    sigma = np.median(np.abs(X_positive - mu), axis=0) * 1.4826  # MAD to std
+    sigma[sigma == 0] = 1.0
+
+    # Generalized log transformation (asinh-based)
+    # vsn(x) = asinh((x - mu) / sigma)
+    X_vsn = np.zeros_like(X_positive)
+
+    for j in range(n_biomarkers):
+        # Iteratively estimate parameters for each biomarker
+        x = X_positive[:, j]
+        m, s = mu[j], sigma[j]
+
+        for _ in range(max_iter):
+            # Transform
+            z = (x - m) / s
+            transformed = np.arcsinh(z)
+
+            # Update parameters using robust estimates
+            m_new = np.median(x - s * np.sinh(transformed))
+            residuals = x - m_new
+            s_new = np.median(np.abs(residuals)) * 1.4826
+
+            if s_new == 0:
+                s_new = s
+
+            # Check convergence
+            if abs(m_new - m) < tol and abs(s_new - s) < tol:
+                break
+
+            m, s = m_new, s_new
+
+        # Apply final transformation
+        X_vsn[:, j] = np.arcsinh((x - m) / s)
+
+    return X_vsn
+
+
+def normalize_ruv(
+    X: np.ndarray,
+    y: Optional[np.ndarray] = None,
+    k: int = 1,
+    control_genes: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Remove Unwanted Variation (RUV) normalization.
+
+    RUV uses negative control features or factor analysis to identify
+    and remove unwanted variation while preserving biological signal.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Input data matrix (samples x biomarkers)
+    y : np.ndarray, optional
+        Group labels (used to identify unwanted variation)
+    k : int
+        Number of unwanted factors to remove
+    control_genes : np.ndarray, optional
+        Boolean mask indicating control biomarkers (not affected by condition)
+
+    Returns:
+    --------
+    np.ndarray
+        RUV-normalized data
+    """
+    n_samples, n_biomarkers = X.shape
+
+    # Log transform for stability
+    X_log = np.log1p(np.maximum(X, 0))
+
+    # If no control genes specified, use residuals from group means
+    if control_genes is None:
+        if y is not None:
+            # Use residuals after removing group effects
+            X_residuals = X_log.copy()
+            for group in np.unique(y):
+                mask = y == group
+                group_mean = np.mean(X_log[mask], axis=0)
+                X_residuals[mask] -= group_mean
+        else:
+            # Use all features, centered
+            X_residuals = X_log - np.mean(X_log, axis=0)
+    else:
+        # Use only control genes
+        X_residuals = X_log[:, control_genes] - np.mean(X_log[:, control_genes], axis=0)
+
+    # SVD to find unwanted factors
+    U, S, Vt = np.linalg.svd(X_residuals, full_matrices=False)
+
+    # Keep only k factors
+    k = min(k, len(S))
+    W = U[:, :k]  # Unwanted factors
+
+    # Remove unwanted variation from all features
+    # X_corrected = X - W @ (W.T @ X)
+    alpha = W.T @ X_log  # Coefficients for unwanted factors
+    X_corrected = X_log - W @ alpha
+
+    # Transform back from log scale
+    X_ruv = np.expm1(X_corrected)
+    X_ruv = np.maximum(X_ruv, 0)  # Ensure non-negative
+
+    return X_ruv
+
+
+def normalize_combat(
+    X: np.ndarray,
+    batch: np.ndarray,
+    y: Optional[np.ndarray] = None,
+    parametric: bool = True
+) -> np.ndarray:
+    """
+    ComBat batch correction for removing batch effects.
+
+    This is a simplified implementation of the ComBat algorithm that
+    adjusts for batch effects while preserving biological variation.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Input data matrix (samples x biomarkers)
+    batch : np.ndarray
+        Batch labels for each sample
+    y : np.ndarray, optional
+        Biological condition labels to preserve
+    parametric : bool
+        Use parametric (True) or non-parametric (False) adjustment
+
+    Returns:
+    --------
+    np.ndarray
+        Batch-corrected data
+    """
+    n_samples, n_biomarkers = X.shape
+    unique_batches = np.unique(batch)
+    n_batches = len(unique_batches)
+
+    if n_batches < 2:
+        return X.copy()
+
+    # Log transform for stability
+    X_log = np.log1p(np.maximum(X, 0))
+
+    # Step 1: Standardize data
+    # Create design matrix for biological covariates
+    if y is not None:
+        unique_groups = np.unique(y)
+        n_groups = len(unique_groups)
+        design = np.zeros((n_samples, n_groups))
+        for i, group in enumerate(unique_groups):
+            design[y == group, i] = 1
+        # Fit and get residuals
+        coeffs = np.linalg.lstsq(design, X_log, rcond=None)[0]
+        X_fitted = design @ coeffs
+    else:
+        X_fitted = np.mean(X_log, axis=0, keepdims=True).repeat(n_samples, axis=0)
+
+    # Grand mean and pooled variance
+    grand_mean = np.mean(X_log, axis=0)
+    pooled_var = np.var(X_log, axis=0, ddof=1)
+    pooled_var[pooled_var == 0] = 1e-10
+
+    # Standardize
+    X_std = (X_log - grand_mean) / np.sqrt(pooled_var)
+
+    # Step 2: Estimate batch effects
+    gamma_hat = np.zeros((n_batches, n_biomarkers))  # Location
+    delta_hat = np.zeros((n_batches, n_biomarkers))  # Scale
+
+    for i, b in enumerate(unique_batches):
+        batch_mask = batch == b
+        batch_data = X_std[batch_mask]
+        gamma_hat[i] = np.mean(batch_data, axis=0)
+        delta_hat[i] = np.var(batch_data, axis=0, ddof=1)
+
+    delta_hat[delta_hat == 0] = 1e-10
+
+    # Step 3: Empirical Bayes shrinkage (parametric)
+    if parametric:
+        # Estimate hyperparameters
+        gamma_bar = np.mean(gamma_hat, axis=0)
+        tau2 = np.var(gamma_hat, axis=0, ddof=1)
+        tau2[tau2 == 0] = 1e-10
+
+        # Shrink estimates
+        gamma_star = np.zeros_like(gamma_hat)
+        delta_star = np.zeros_like(delta_hat)
+
+        for i in range(n_batches):
+            n_batch = np.sum(batch == unique_batches[i])
+            # Posterior mean for gamma
+            gamma_star[i] = (tau2 * gamma_hat[i] + (1/n_batch) * gamma_bar) / (tau2 + 1/n_batch)
+            # Use pooled variance estimate for delta
+            delta_star[i] = delta_hat[i]
+    else:
+        gamma_star = gamma_hat
+        delta_star = delta_hat
+
+    # Step 4: Adjust data
+    X_combat = np.zeros_like(X_log)
+
+    for i, b in enumerate(unique_batches):
+        batch_mask = batch == b
+        # Remove batch effect
+        adjusted = (X_std[batch_mask] - gamma_star[i]) / np.sqrt(delta_star[i])
+        # Add back grand mean and variance
+        X_combat[batch_mask] = adjusted * np.sqrt(pooled_var) + grand_mean
+
+    # Transform back
+    X_combat = np.expm1(X_combat)
+    X_combat = np.maximum(X_combat, 0)
+
+    return X_combat
+
+
+def normalize_loess(X: np.ndarray, reference_idx: int = 0, span: float = 0.3) -> np.ndarray:
+    """
+    LOESS (Locally Estimated Scatterplot Smoothing) normalization.
+
+    Normalizes each biomarker against a reference using local regression,
+    which can capture non-linear systematic biases.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Input data matrix (samples x biomarkers)
+    reference_idx : int
+        Index of reference biomarker
+    span : float
+        Smoothing span for LOESS (0-1)
+
+    Returns:
+    --------
+    np.ndarray
+        LOESS-normalized data
+    """
+    from scipy.interpolate import UnivariateSpline
+
+    n_samples, n_biomarkers = X.shape
+    X_norm = X.copy()
+
+    reference = X[:, reference_idx]
+    ref_sorted_idx = np.argsort(reference)
+    ref_sorted = reference[ref_sorted_idx]
+
+    for j in range(n_biomarkers):
+        if j == reference_idx:
+            continue
+
+        target = X[:, j]
+        target_sorted = target[ref_sorted_idx]
+
+        # Compute M-A values (log-ratio vs average)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            M = np.log2(target_sorted + 1) - np.log2(ref_sorted + 1)
+            A = 0.5 * (np.log2(target_sorted + 1) + np.log2(ref_sorted + 1))
+
+        # Handle infinities
+        valid = np.isfinite(M) & np.isfinite(A)
+        if np.sum(valid) < 4:
+            continue
+
+        # Fit smoothing spline (approximation of LOESS)
+        try:
+            # Use smoothing spline as LOESS approximation
+            k = min(3, np.sum(valid) - 1)
+            if k < 1:
+                continue
+            spline = UnivariateSpline(A[valid], M[valid], k=k, s=len(A[valid]) * span)
+            correction = spline(A)
+            correction[~valid] = 0
+
+            # Apply correction
+            corrected = np.log2(target_sorted + 1) - correction
+            X_norm[ref_sorted_idx, j] = 2**corrected - 1
+        except Exception:
+            # If spline fitting fails, skip this biomarker
+            continue
+
+    X_norm = np.maximum(X_norm, 0)
     return X_norm
 
 
 def normalize_data(
     X: np.ndarray,
     method: str = 'none',
-    reference_idx: Optional[int] = None
+    reference_idx: Optional[int] = None,
+    y: Optional[np.ndarray] = None,
+    batch: Optional[np.ndarray] = None,
+    **kwargs
 ) -> np.ndarray:
     """
     Apply normalization method to the data.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Input data matrix (samples x biomarkers)
+    method : str
+        Normalization method to apply
+    reference_idx : int, optional
+        Index of reference biomarker (for reference-based methods)
+    y : np.ndarray, optional
+        Group labels (for RUV and ComBat)
+    batch : np.ndarray, optional
+        Batch labels (for ComBat)
+    **kwargs : dict
+        Additional method-specific parameters
+
+    Returns:
+    --------
+    np.ndarray
+        Normalized data
     """
     # Handle missing or zero values for some methods
     X_clean = X.copy()
-    X_clean[X_clean <= 0] = np.min(X_clean[X_clean > 0]) / 10
-    
+    min_positive = np.min(X_clean[X_clean > 0]) if np.any(X_clean > 0) else 1e-10
+    X_clean[X_clean <= 0] = min_positive / 10
+
     if method == 'none':
         return X
     elif method == 'total_sum':
@@ -583,6 +1192,24 @@ def normalize_data(
         return isometric_log_ratio(X_clean)
     elif method == 'quantile':
         return normalize_quantile(X_clean)
+    elif method == 'median':
+        return normalize_median(X_clean)
+    elif method == 'vsn':
+        return normalize_vsn(X_clean, **kwargs)
+    elif method == 'ruv':
+        k = kwargs.get('k', 1)
+        control_genes = kwargs.get('control_genes', None)
+        return normalize_ruv(X_clean, y=y, k=k, control_genes=control_genes)
+    elif method == 'combat':
+        if batch is None:
+            # If no batch provided, create synthetic batches based on dilution quartiles
+            batch = np.zeros(X.shape[0], dtype=int)
+        return normalize_combat(X_clean, batch=batch, y=y, **kwargs)
+    elif method == 'loess':
+        if reference_idx is None:
+            reference_idx = 0
+        span = kwargs.get('span', 0.3)
+        return normalize_loess(X_clean, reference_idx=reference_idx, span=span)
     else:
         raise ValueError(f"Unknown normalization method: {method}")
 
@@ -712,36 +1339,945 @@ def analyze_classification(
 ) -> np.ndarray:
     """
     Train classifier and make predictions.
-    
+
     Returns:
     --------
     np.ndarray
         Predicted class probabilities for each sample
     """
     from sklearn import linear_model, ensemble, svm
-    
+
     # Standardize data
     scaler = preprocessing.StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    
+
     if method == 'logistic':
         # Logistic regression
         clf = linear_model.LogisticRegression(max_iter=1000, random_state=42)
-    
+
     elif method == 'random_forest':
         # Random forest
         clf = ensemble.RandomForestClassifier(n_estimators=100, random_state=42)
-    
+
     elif method == 'svm':
         # Support vector machine
         clf = svm.SVC(probability=True, random_state=42)
-    
+
     # Train model
     clf.fit(X_train_scaled, y_train)
-    
+
     # Predict probabilities
     return clf.predict_proba(X_test_scaled)
+
+
+#-------------------------------------------------------
+# Advanced Machine Learning Methods
+#-------------------------------------------------------
+
+def analyze_classification_advanced(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    method: str = 'xgboost',
+    tune_hyperparameters: bool = False,
+    n_cv_folds: int = 5
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Advanced classification with additional methods and hyperparameter tuning.
+
+    Parameters:
+    -----------
+    X_train : np.ndarray
+        Training data
+    y_train : np.ndarray
+        Training labels
+    X_test : np.ndarray
+        Test data
+    method : str
+        Classification method: 'xgboost', 'gradient_boosting', 'extra_trees',
+        'mlp', 'logistic_l1', 'logistic_l2', 'logistic_elasticnet'
+    tune_hyperparameters : bool
+        Whether to perform hyperparameter tuning
+    n_cv_folds : int
+        Number of cross-validation folds for tuning
+
+    Returns:
+    --------
+    Tuple[np.ndarray, Dict]
+        (predicted probabilities, model info dict)
+    """
+    from sklearn import linear_model, ensemble, neural_network
+    from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+
+    # Standardize data
+    scaler = preprocessing.StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    model_info = {'method': method, 'tuned': tune_hyperparameters}
+
+    # Define models and parameter grids
+    if method == 'xgboost':
+        try:
+            from xgboost import XGBClassifier
+            clf = XGBClassifier(
+                n_estimators=100,
+                max_depth=3,
+                learning_rate=0.1,
+                random_state=42,
+                use_label_encoder=False,
+                eval_metric='logloss'
+            )
+            param_grid = {
+                'n_estimators': [50, 100, 200],
+                'max_depth': [2, 3, 5],
+                'learning_rate': [0.01, 0.1, 0.2]
+            }
+        except ImportError:
+            # Fallback to gradient boosting if xgboost not available
+            clf = ensemble.GradientBoostingClassifier(
+                n_estimators=100, max_depth=3, random_state=42
+            )
+            param_grid = {
+                'n_estimators': [50, 100, 200],
+                'max_depth': [2, 3, 5],
+                'learning_rate': [0.01, 0.1, 0.2]
+            }
+            model_info['fallback'] = 'gradient_boosting'
+
+    elif method == 'gradient_boosting':
+        clf = ensemble.GradientBoostingClassifier(
+            n_estimators=100, max_depth=3, random_state=42
+        )
+        param_grid = {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [2, 3, 5],
+            'learning_rate': [0.01, 0.1, 0.2]
+        }
+
+    elif method == 'extra_trees':
+        clf = ensemble.ExtraTreesClassifier(
+            n_estimators=100, random_state=42
+        )
+        param_grid = {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [None, 5, 10],
+            'min_samples_split': [2, 5, 10]
+        }
+
+    elif method == 'mlp':
+        clf = neural_network.MLPClassifier(
+            hidden_layer_sizes=(100,), max_iter=500, random_state=42
+        )
+        param_grid = {
+            'hidden_layer_sizes': [(50,), (100,), (100, 50)],
+            'alpha': [0.0001, 0.001, 0.01],
+            'learning_rate_init': [0.001, 0.01]
+        }
+
+    elif method == 'logistic_l1':
+        clf = linear_model.LogisticRegression(
+            penalty='l1', solver='saga', max_iter=1000, random_state=42
+        )
+        param_grid = {
+            'C': [0.01, 0.1, 1.0, 10.0]
+        }
+
+    elif method == 'logistic_l2':
+        clf = linear_model.LogisticRegression(
+            penalty='l2', max_iter=1000, random_state=42
+        )
+        param_grid = {
+            'C': [0.01, 0.1, 1.0, 10.0]
+        }
+
+    elif method == 'logistic_elasticnet':
+        clf = linear_model.LogisticRegression(
+            penalty='elasticnet', solver='saga', l1_ratio=0.5,
+            max_iter=1000, random_state=42
+        )
+        param_grid = {
+            'C': [0.01, 0.1, 1.0, 10.0],
+            'l1_ratio': [0.2, 0.5, 0.8]
+        }
+
+    else:
+        raise ValueError(f"Unknown classification method: {method}")
+
+    # Hyperparameter tuning
+    if tune_hyperparameters and len(np.unique(y_train)) > 1:
+        try:
+            grid_search = GridSearchCV(
+                clf, param_grid, cv=n_cv_folds, scoring='accuracy', n_jobs=-1
+            )
+            grid_search.fit(X_train_scaled, y_train)
+            clf = grid_search.best_estimator_
+            model_info['best_params'] = grid_search.best_params_
+            model_info['cv_score'] = grid_search.best_score_
+        except Exception as e:
+            # If tuning fails, use default parameters
+            clf.fit(X_train_scaled, y_train)
+            model_info['tuning_error'] = str(e)
+    else:
+        clf.fit(X_train_scaled, y_train)
+
+    # Predict probabilities
+    y_proba = clf.predict_proba(X_test_scaled)
+
+    # Extract feature importances if available
+    if hasattr(clf, 'feature_importances_'):
+        model_info['feature_importances'] = clf.feature_importances_
+    elif hasattr(clf, 'coef_'):
+        model_info['coefficients'] = clf.coef_
+
+    return y_proba, model_info
+
+
+def feature_selection(
+    X: np.ndarray,
+    y: np.ndarray,
+    method: str = 'lasso',
+    n_features: Optional[int] = None,
+    threshold: Optional[float] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Perform feature selection using various methods.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (samples x biomarkers)
+    y : np.ndarray
+        Labels
+    method : str
+        Selection method: 'lasso', 'rfe', 'mutual_info', 'f_classif',
+        'random_forest', 'boruta'
+    n_features : int, optional
+        Number of features to select
+    threshold : float, optional
+        Threshold for feature importance
+
+    Returns:
+    --------
+    Tuple[np.ndarray, np.ndarray]
+        (selected feature indices, feature scores/importances)
+    """
+    from sklearn.feature_selection import (
+        SelectKBest, f_classif, mutual_info_classif, RFE
+    )
+    from sklearn import linear_model, ensemble
+
+    n_biomarkers = X.shape[1]
+
+    # Default to selecting half of features
+    if n_features is None:
+        n_features = max(1, n_biomarkers // 2)
+
+    # Standardize for some methods
+    scaler = preprocessing.StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    if method == 'lasso':
+        # LASSO-based selection
+        lasso = linear_model.LogisticRegression(
+            penalty='l1', solver='saga', max_iter=1000, random_state=42
+        )
+        lasso.fit(X_scaled, y)
+
+        # Get absolute coefficients
+        if len(lasso.coef_.shape) > 1:
+            importances = np.mean(np.abs(lasso.coef_), axis=0)
+        else:
+            importances = np.abs(lasso.coef_)
+
+        # Select top features
+        if threshold is not None:
+            selected = np.where(importances > threshold)[0]
+        else:
+            selected = np.argsort(importances)[-n_features:]
+
+    elif method == 'rfe':
+        # Recursive Feature Elimination
+        estimator = linear_model.LogisticRegression(max_iter=1000, random_state=42)
+        rfe = RFE(estimator, n_features_to_select=n_features)
+        rfe.fit(X_scaled, y)
+
+        selected = np.where(rfe.support_)[0]
+        importances = rfe.ranking_
+
+    elif method == 'mutual_info':
+        # Mutual information
+        importances = mutual_info_classif(X, y, random_state=42)
+        selected = np.argsort(importances)[-n_features:]
+
+    elif method == 'f_classif':
+        # F-test (ANOVA F-value)
+        selector = SelectKBest(f_classif, k=n_features)
+        selector.fit(X, y)
+
+        importances = selector.scores_
+        selected = np.where(selector.get_support())[0]
+
+    elif method == 'random_forest':
+        # Random Forest importance
+        rf = ensemble.RandomForestClassifier(n_estimators=100, random_state=42)
+        rf.fit(X, y)
+
+        importances = rf.feature_importances_
+
+        if threshold is not None:
+            selected = np.where(importances > threshold)[0]
+        else:
+            selected = np.argsort(importances)[-n_features:]
+
+    elif method == 'boruta':
+        # Boruta-like all-relevant feature selection
+        # Simplified implementation using shadow features
+        n_iterations = 100
+        hit_counts = np.zeros(n_biomarkers)
+
+        for _ in range(n_iterations):
+            # Create shadow features (shuffled copies)
+            X_shadow = X.copy()
+            for j in range(n_biomarkers):
+                np.random.shuffle(X_shadow[:, j])
+
+            X_combined = np.hstack([X, X_shadow])
+
+            # Train random forest
+            rf = ensemble.RandomForestClassifier(n_estimators=50, random_state=None)
+            rf.fit(X_combined, y)
+
+            # Get importances
+            real_imp = rf.feature_importances_[:n_biomarkers]
+            shadow_imp = rf.feature_importances_[n_biomarkers:]
+            shadow_max = np.max(shadow_imp)
+
+            # Count hits (real > max shadow)
+            hit_counts += (real_imp > shadow_max).astype(int)
+
+        # Select features that beat shadow features consistently
+        importances = hit_counts / n_iterations
+
+        if threshold is not None:
+            selected = np.where(importances > threshold)[0]
+        else:
+            selected = np.argsort(importances)[-n_features:]
+
+    else:
+        raise ValueError(f"Unknown feature selection method: {method}")
+
+    # Ensure we return at least one feature
+    if len(selected) == 0:
+        selected = np.array([np.argmax(importances)])
+
+    return selected, importances
+
+
+def cross_validate_classification(
+    X: np.ndarray,
+    y: np.ndarray,
+    method: str = 'logistic',
+    n_folds: int = 5,
+    stratified: bool = True,
+    return_predictions: bool = False
+) -> Dict:
+    """
+    Perform cross-validated classification with comprehensive metrics.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix
+    y : np.ndarray
+        Labels
+    method : str
+        Classification method
+    n_folds : int
+        Number of CV folds
+    stratified : bool
+        Use stratified folds
+    return_predictions : bool
+        Return out-of-fold predictions
+
+    Returns:
+    --------
+    Dict containing CV results
+    """
+    from sklearn.model_selection import StratifiedKFold, KFold
+
+    if stratified:
+        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    else:
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+    # Initialize storage
+    fold_metrics = []
+    all_y_true = []
+    all_y_pred = []
+    all_y_proba = []
+
+    for fold, (train_idx, test_idx) in enumerate(kf.split(X, y)):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        # Get predictions
+        if method in ['xgboost', 'gradient_boosting', 'extra_trees', 'mlp',
+                      'logistic_l1', 'logistic_l2', 'logistic_elasticnet']:
+            y_proba, _ = analyze_classification_advanced(
+                X_train, y_train, X_test, method
+            )
+        else:
+            y_proba = analyze_classification(X_train, y_train, X_test, method)
+
+        y_pred = np.argmax(y_proba, axis=1)
+
+        # Store predictions
+        all_y_true.extend(y_test)
+        all_y_pred.extend(y_pred)
+        all_y_proba.extend(y_proba)
+
+        # Calculate fold metrics
+        fold_result = evaluate_classification(y_test, y_proba)
+        fold_result['fold'] = fold
+        fold_metrics.append(fold_result)
+
+    # Aggregate results
+    all_y_true = np.array(all_y_true)
+    all_y_pred = np.array(all_y_pred)
+    all_y_proba = np.array(all_y_proba)
+
+    # Calculate overall metrics
+    overall_metrics = evaluate_classification(all_y_true, all_y_proba)
+
+    # Calculate mean and std of fold metrics
+    metric_names = [k for k in fold_metrics[0].keys() if k != 'fold']
+    summary = {}
+    for metric in metric_names:
+        values = [f[metric] for f in fold_metrics if not np.isnan(f[metric])]
+        if values:
+            summary[f'{metric}_mean'] = np.mean(values)
+            summary[f'{metric}_std'] = np.std(values)
+
+    results = {
+        'overall': overall_metrics,
+        'fold_metrics': fold_metrics,
+        'summary': summary,
+        'n_folds': n_folds,
+        'method': method
+    }
+
+    if return_predictions:
+        results['y_true'] = all_y_true
+        results['y_pred'] = all_y_pred
+        results['y_proba'] = all_y_proba
+
+    return results
+
+
+def ensemble_classification(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    methods: List[str] = None,
+    voting: str = 'soft'
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Ensemble classification combining multiple methods.
+
+    Parameters:
+    -----------
+    X_train, y_train : training data
+    X_test : test data
+    methods : list of classification methods to ensemble
+    voting : 'soft' (probability average) or 'hard' (majority vote)
+
+    Returns:
+    --------
+    Tuple[np.ndarray, Dict]
+        (ensemble predictions, individual model results)
+    """
+    if methods is None:
+        methods = ['logistic', 'random_forest', 'gradient_boosting']
+
+    # Collect predictions from each method
+    all_proba = []
+    all_pred = []
+    model_results = {}
+
+    for method in methods:
+        try:
+            if method in ['xgboost', 'gradient_boosting', 'extra_trees', 'mlp',
+                          'logistic_l1', 'logistic_l2', 'logistic_elasticnet']:
+                y_proba, info = analyze_classification_advanced(
+                    X_train, y_train, X_test, method
+                )
+            else:
+                y_proba = analyze_classification(X_train, y_train, X_test, method)
+                info = {}
+
+            all_proba.append(y_proba)
+            all_pred.append(np.argmax(y_proba, axis=1))
+            model_results[method] = {'proba': y_proba, 'info': info}
+        except Exception as e:
+            model_results[method] = {'error': str(e)}
+
+    if len(all_proba) == 0:
+        raise ValueError("All classification methods failed")
+
+    # Ensemble predictions
+    if voting == 'soft':
+        # Average probabilities
+        ensemble_proba = np.mean(all_proba, axis=0)
+    else:
+        # Hard voting (majority)
+        all_pred = np.array(all_pred)
+        n_classes = all_proba[0].shape[1]
+        ensemble_proba = np.zeros((X_test.shape[0], n_classes))
+        for i in range(X_test.shape[0]):
+            votes = all_pred[:, i]
+            for c in range(n_classes):
+                ensemble_proba[i, c] = np.sum(votes == c) / len(votes)
+
+    return ensemble_proba, model_results
+
+
+#-------------------------------------------------------
+# Enhanced Statistical Analysis
+#-------------------------------------------------------
+
+def multiple_testing_correction(
+    p_values: np.ndarray,
+    method: str = 'fdr_bh',
+    alpha: float = 0.05
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Apply multiple testing correction to p-values.
+
+    Parameters:
+    -----------
+    p_values : np.ndarray
+        Array of p-values
+    method : str
+        Correction method: 'bonferroni', 'fdr_bh' (Benjamini-Hochberg),
+        'fdr_by' (Benjamini-Yekutieli), 'holm', 'hochberg'
+    alpha : float
+        Significance level
+
+    Returns:
+    --------
+    Tuple[np.ndarray, np.ndarray]
+        (corrected p-values, boolean array of significant results)
+    """
+    n = len(p_values)
+    sorted_idx = np.argsort(p_values)
+    sorted_p = p_values[sorted_idx]
+
+    if method == 'bonferroni':
+        # Bonferroni correction
+        corrected = np.minimum(p_values * n, 1.0)
+        significant = corrected < alpha
+
+    elif method == 'fdr_bh':
+        # Benjamini-Hochberg FDR
+        corrected = np.zeros(n)
+        ranks = np.arange(1, n + 1)
+
+        # Calculate adjusted p-values
+        adjusted = sorted_p * n / ranks
+        # Ensure monotonicity
+        cummin = np.minimum.accumulate(adjusted[::-1])[::-1]
+        corrected[sorted_idx] = np.minimum(cummin, 1.0)
+        significant = corrected < alpha
+
+    elif method == 'fdr_by':
+        # Benjamini-Yekutieli FDR (more conservative)
+        corrected = np.zeros(n)
+        ranks = np.arange(1, n + 1)
+        c_n = np.sum(1.0 / ranks)  # Correction factor
+
+        adjusted = sorted_p * n * c_n / ranks
+        cummin = np.minimum.accumulate(adjusted[::-1])[::-1]
+        corrected[sorted_idx] = np.minimum(cummin, 1.0)
+        significant = corrected < alpha
+
+    elif method == 'holm':
+        # Holm-Bonferroni step-down
+        corrected = np.zeros(n)
+        for i, idx in enumerate(sorted_idx):
+            corrected[idx] = min((n - i) * sorted_p[i], 1.0)
+        # Ensure monotonicity
+        cummax = np.maximum.accumulate(corrected[sorted_idx])
+        corrected[sorted_idx] = cummax
+        significant = corrected < alpha
+
+    elif method == 'hochberg':
+        # Hochberg step-up
+        corrected = np.zeros(n)
+        for i in range(n - 1, -1, -1):
+            idx = sorted_idx[i]
+            corrected[idx] = min((n - i) * sorted_p[i], 1.0)
+        # Ensure monotonicity (reverse)
+        for i in range(1, n):
+            idx = sorted_idx[i]
+            prev_idx = sorted_idx[i - 1]
+            corrected[idx] = min(corrected[idx], corrected[prev_idx])
+        significant = corrected < alpha
+
+    else:
+        raise ValueError(f"Unknown correction method: {method}")
+
+    return corrected, significant
+
+
+def calculate_effect_size(
+    X: np.ndarray,
+    y: np.ndarray,
+    method: str = 'cohens_d'
+) -> np.ndarray:
+    """
+    Calculate effect sizes for each biomarker between groups.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (samples x biomarkers)
+    y : np.ndarray
+        Group labels
+    method : str
+        Effect size method: 'cohens_d', 'hedges_g', 'glass_delta', 'cliff_delta'
+
+    Returns:
+    --------
+    np.ndarray
+        Effect sizes for each biomarker
+    """
+    unique_groups = np.unique(y)
+    n_biomarkers = X.shape[1]
+
+    if len(unique_groups) != 2:
+        # For multi-group, calculate eta-squared instead
+        return calculate_eta_squared(X, y)
+
+    group0 = X[y == unique_groups[0]]
+    group1 = X[y == unique_groups[1]]
+
+    n0, n1 = len(group0), len(group1)
+    mean0 = np.mean(group0, axis=0)
+    mean1 = np.mean(group1, axis=0)
+    var0 = np.var(group0, axis=0, ddof=1)
+    var1 = np.var(group1, axis=0, ddof=1)
+
+    effect_sizes = np.zeros(n_biomarkers)
+
+    if method == 'cohens_d':
+        # Cohen's d: standardized mean difference
+        pooled_std = np.sqrt(((n0 - 1) * var0 + (n1 - 1) * var1) / (n0 + n1 - 2))
+        pooled_std[pooled_std == 0] = 1e-10
+        effect_sizes = (mean1 - mean0) / pooled_std
+
+    elif method == 'hedges_g':
+        # Hedges' g: bias-corrected Cohen's d
+        pooled_std = np.sqrt(((n0 - 1) * var0 + (n1 - 1) * var1) / (n0 + n1 - 2))
+        pooled_std[pooled_std == 0] = 1e-10
+        d = (mean1 - mean0) / pooled_std
+        # Correction factor for small samples
+        correction = 1 - 3 / (4 * (n0 + n1) - 9)
+        effect_sizes = d * correction
+
+    elif method == 'glass_delta':
+        # Glass's delta: uses control group std only
+        std0 = np.sqrt(var0)
+        std0[std0 == 0] = 1e-10
+        effect_sizes = (mean1 - mean0) / std0
+
+    elif method == 'cliff_delta':
+        # Cliff's delta: non-parametric effect size
+        for j in range(n_biomarkers):
+            x0 = group0[:, j]
+            x1 = group1[:, j]
+            # Count dominance
+            n_greater = np.sum(x1[:, np.newaxis] > x0)
+            n_less = np.sum(x1[:, np.newaxis] < x0)
+            effect_sizes[j] = (n_greater - n_less) / (n0 * n1)
+
+    return effect_sizes
+
+
+def calculate_eta_squared(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Calculate eta-squared (effect size for ANOVA) for each biomarker.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (samples x biomarkers)
+    y : np.ndarray
+        Group labels
+
+    Returns:
+    --------
+    np.ndarray
+        Eta-squared values for each biomarker
+    """
+    n_biomarkers = X.shape[1]
+    unique_groups = np.unique(y)
+    eta_squared = np.zeros(n_biomarkers)
+
+    for j in range(n_biomarkers):
+        # Total sum of squares
+        grand_mean = np.mean(X[:, j])
+        ss_total = np.sum((X[:, j] - grand_mean) ** 2)
+
+        # Between-group sum of squares
+        ss_between = 0
+        for group in unique_groups:
+            group_data = X[y == group, j]
+            group_mean = np.mean(group_data)
+            ss_between += len(group_data) * (group_mean - grand_mean) ** 2
+
+        if ss_total > 0:
+            eta_squared[j] = ss_between / ss_total
+        else:
+            eta_squared[j] = 0
+
+    return eta_squared
+
+
+def bootstrap_confidence_interval(
+    X: np.ndarray,
+    y: np.ndarray,
+    statistic_func: callable,
+    n_bootstrap: int = 1000,
+    confidence_level: float = 0.95,
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calculate bootstrap confidence intervals for a statistic.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (samples x biomarkers)
+    y : np.ndarray
+        Group labels
+    statistic_func : callable
+        Function that takes (X, y) and returns statistic(s)
+    n_bootstrap : int
+        Number of bootstrap iterations
+    confidence_level : float
+        Confidence level (0-1)
+    random_state : int
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        (point estimate, lower CI, upper CI)
+    """
+    np.random.seed(random_state)
+    n_samples = len(y)
+
+    # Calculate point estimate
+    point_estimate = statistic_func(X, y)
+
+    # Bootstrap resampling
+    bootstrap_stats = []
+    for _ in range(n_bootstrap):
+        # Resample with replacement
+        indices = np.random.choice(n_samples, size=n_samples, replace=True)
+        X_boot = X[indices]
+        y_boot = y[indices]
+
+        # Calculate statistic
+        stat = statistic_func(X_boot, y_boot)
+        bootstrap_stats.append(stat)
+
+    bootstrap_stats = np.array(bootstrap_stats)
+
+    # Calculate percentile confidence intervals
+    alpha = 1 - confidence_level
+    lower_percentile = alpha / 2 * 100
+    upper_percentile = (1 - alpha / 2) * 100
+
+    lower_ci = np.percentile(bootstrap_stats, lower_percentile, axis=0)
+    upper_ci = np.percentile(bootstrap_stats, upper_percentile, axis=0)
+
+    return point_estimate, lower_ci, upper_ci
+
+
+def power_analysis(
+    effect_size: float,
+    n_per_group: int,
+    alpha: float = 0.05,
+    test_type: str = 't_test'
+) -> float:
+    """
+    Calculate statistical power for a given effect size and sample size.
+
+    Parameters:
+    -----------
+    effect_size : float
+        Expected effect size (Cohen's d for t-test)
+    n_per_group : int
+        Number of samples per group
+    alpha : float
+        Significance level
+    test_type : str
+        Type of test: 't_test' or 'anova'
+
+    Returns:
+    --------
+    float
+        Statistical power (0-1)
+    """
+    from scipy.stats import norm, ncf
+
+    if test_type == 't_test':
+        # Two-sample t-test power calculation
+        # Non-centrality parameter
+        ncp = effect_size * np.sqrt(n_per_group / 2)
+
+        # Degrees of freedom
+        df = 2 * n_per_group - 2
+
+        # Critical t-value
+        t_crit = stats.t.ppf(1 - alpha / 2, df)
+
+        # Power = P(|T| > t_crit | H1)
+        # Using non-central t distribution
+        power = 1 - stats.nct.cdf(t_crit, df, ncp) + stats.nct.cdf(-t_crit, df, ncp)
+
+    elif test_type == 'anova':
+        # One-way ANOVA power (for 2 groups, equivalent to t-test)
+        # Effect size is eta-squared or f
+        f_effect = effect_size / np.sqrt(1 - effect_size) if effect_size < 1 else effect_size
+
+        df1 = 1  # Between groups df (for 2 groups)
+        df2 = 2 * n_per_group - 2  # Within groups df
+
+        # Non-centrality parameter
+        ncp = f_effect ** 2 * 2 * n_per_group
+
+        # Critical F-value
+        f_crit = stats.f.ppf(1 - alpha, df1, df2)
+
+        # Power using non-central F distribution
+        power = 1 - ncf.cdf(f_crit, df1, df2, ncp)
+
+    else:
+        raise ValueError(f"Unknown test type: {test_type}")
+
+    return power
+
+
+def sample_size_estimation(
+    effect_size: float,
+    power: float = 0.8,
+    alpha: float = 0.05,
+    test_type: str = 't_test'
+) -> int:
+    """
+    Estimate required sample size per group for desired power.
+
+    Parameters:
+    -----------
+    effect_size : float
+        Expected effect size (Cohen's d)
+    power : float
+        Desired statistical power
+    alpha : float
+        Significance level
+    test_type : str
+        Type of test
+
+    Returns:
+    --------
+    int
+        Required sample size per group
+    """
+    # Binary search for sample size
+    n_min, n_max = 2, 10000
+
+    while n_max - n_min > 1:
+        n_mid = (n_min + n_max) // 2
+        achieved_power = power_analysis(effect_size, n_mid, alpha, test_type)
+
+        if achieved_power >= power:
+            n_max = n_mid
+        else:
+            n_min = n_mid
+
+    return n_max
+
+
+def analyze_univariate_enhanced(
+    X: np.ndarray,
+    y: np.ndarray,
+    test_type: str = 't_test',
+    correction_method: str = 'fdr_bh',
+    alpha: float = 0.05,
+    calculate_effect_sizes: bool = True
+) -> Dict:
+    """
+    Enhanced univariate analysis with multiple testing correction and effect sizes.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (samples x biomarkers)
+    y : np.ndarray
+        Group labels
+    test_type : str
+        Statistical test type
+    correction_method : str
+        Multiple testing correction method
+    alpha : float
+        Significance level
+    calculate_effect_sizes : bool
+        Whether to calculate effect sizes
+
+    Returns:
+    --------
+    Dict containing:
+        - p_values: raw p-values
+        - p_adjusted: corrected p-values
+        - significant: boolean mask of significant biomarkers
+        - test_statistics: test statistics
+        - effect_sizes: effect sizes (if calculated)
+        - fold_changes: log2 fold changes
+    """
+    # Perform basic univariate tests
+    p_values, test_stats = analyze_univariate(X, y, test_type)
+
+    # Multiple testing correction
+    p_adjusted, significant = multiple_testing_correction(p_values, correction_method, alpha)
+
+    results = {
+        'p_values': p_values,
+        'p_adjusted': p_adjusted,
+        'significant': significant,
+        'test_statistics': test_stats,
+        'n_significant': np.sum(significant)
+    }
+
+    # Calculate effect sizes
+    if calculate_effect_sizes:
+        effect_sizes = calculate_effect_size(X, y, method='cohens_d')
+        results['effect_sizes'] = effect_sizes
+
+    # Calculate fold changes (for two groups)
+    unique_groups = np.unique(y)
+    if len(unique_groups) == 2:
+        mean0 = np.mean(X[y == unique_groups[0]], axis=0)
+        mean1 = np.mean(X[y == unique_groups[1]], axis=0)
+        # Log2 fold change
+        with np.errstate(divide='ignore', invalid='ignore'):
+            fc = np.log2((mean1 + 1e-10) / (mean0 + 1e-10))
+        results['fold_changes'] = fc
+
+    return results
 
 #-------------------------------------------------------
 # Evaluation Metrics
