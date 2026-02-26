@@ -506,17 +506,585 @@ def visualize_dilution_recovery(dataset_params=None):
     return fig
 
 
+def plot_volcano(
+    fold_changes: np.ndarray,
+    p_values: np.ndarray,
+    biomarker_names: List[str] = None,
+    fc_threshold: float = 1.0,
+    p_threshold: float = 0.05,
+    title: str = "Volcano Plot",
+    figsize: Tuple[int, int] = (10, 8)
+) -> plt.Figure:
+    """
+    Create a volcano plot for differential expression analysis.
+
+    Parameters:
+    -----------
+    fold_changes : np.ndarray
+        Log2 fold changes
+    p_values : np.ndarray
+        P-values (will be -log10 transformed)
+    biomarker_names : list, optional
+        Names of biomarkers for labeling
+    fc_threshold : float
+        Fold change threshold for significance
+    p_threshold : float
+        P-value threshold for significance
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Transform p-values
+    neg_log_p = -np.log10(p_values + 1e-300)
+
+    # Determine significance
+    significant_up = (fold_changes > fc_threshold) & (p_values < p_threshold)
+    significant_down = (fold_changes < -fc_threshold) & (p_values < p_threshold)
+    not_significant = ~(significant_up | significant_down)
+
+    # Plot points
+    ax.scatter(fold_changes[not_significant], neg_log_p[not_significant],
+               c='gray', alpha=0.5, s=50, label='Not significant')
+    ax.scatter(fold_changes[significant_up], neg_log_p[significant_up],
+               c='red', alpha=0.7, s=50, label='Upregulated')
+    ax.scatter(fold_changes[significant_down], neg_log_p[significant_down],
+               c='blue', alpha=0.7, s=50, label='Downregulated')
+
+    # Add threshold lines
+    ax.axhline(y=-np.log10(p_threshold), color='gray', linestyle='--', alpha=0.5)
+    ax.axvline(x=fc_threshold, color='gray', linestyle='--', alpha=0.5)
+    ax.axvline(x=-fc_threshold, color='gray', linestyle='--', alpha=0.5)
+
+    # Label significant points
+    if biomarker_names is not None:
+        significant = significant_up | significant_down
+        for i in np.where(significant)[0]:
+            ax.annotate(biomarker_names[i],
+                       (fold_changes[i], neg_log_p[i]),
+                       fontsize=8, alpha=0.8)
+
+    ax.set_xlabel('Log2 Fold Change')
+    ax.set_ylabel('-Log10 P-value')
+    ax.set_title(title)
+    ax.legend()
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_roc_curves_comparison(
+    y_true: np.ndarray,
+    predictions_dict: Dict[str, np.ndarray],
+    title: str = "ROC Curve Comparison",
+    figsize: Tuple[int, int] = (10, 8)
+) -> plt.Figure:
+    """
+    Plot ROC curves for multiple methods/normalization approaches.
+
+    Parameters:
+    -----------
+    y_true : np.ndarray
+        True labels
+    predictions_dict : dict
+        Dictionary of {method_name: predicted_probabilities}
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    from sklearn.metrics import roc_curve, auc
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    colors = plt.cm.Set2(np.linspace(0, 1, len(predictions_dict)))
+
+    for (method_name, y_proba), color in zip(predictions_dict.items(), colors):
+        # Handle multi-class by using one-vs-rest for first class
+        if len(y_proba.shape) > 1:
+            y_score = y_proba[:, 1] if y_proba.shape[1] == 2 else y_proba[:, 0]
+        else:
+            y_score = y_proba
+
+        # Calculate ROC curve
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        roc_auc = auc(fpr, tpr)
+
+        ax.plot(fpr, tpr, color=color, lw=2,
+                label=f'{method_name} (AUC = {roc_auc:.3f})')
+
+    # Diagonal line
+    ax.plot([0, 1], [0, 1], 'k--', lw=1, alpha=0.5)
+
+    ax.set_xlim([0, 1])
+    ax.set_ylim([0, 1.05])
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.set_title(title)
+    ax.legend(loc='lower right')
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_pca_3d(
+    X: np.ndarray,
+    y: np.ndarray,
+    dilution_factors: np.ndarray = None,
+    title: str = "3D PCA Visualization",
+    figsize: Tuple[int, int] = (12, 10)
+) -> plt.Figure:
+    """
+    Create 3D PCA visualization.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix
+    y : np.ndarray
+        Group labels
+    dilution_factors : np.ndarray, optional
+        Dilution factors for coloring
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    from mpl_toolkits.mplot3d import Axes3D
+
+    # Perform PCA
+    pca = PCA(n_components=3)
+    X_pca = pca.fit_transform(X)
+    var_explained = pca.explained_variance_ratio_
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111, projection='3d')
+
+    unique_groups = np.unique(y)
+    colors = plt.cm.Set1(np.linspace(0, 1, len(unique_groups)))
+
+    for group, color in zip(unique_groups, colors):
+        mask = y == group
+        if dilution_factors is not None:
+            scatter = ax.scatter(
+                X_pca[mask, 0], X_pca[mask, 1], X_pca[mask, 2],
+                c=dilution_factors[mask], cmap='viridis',
+                s=50, alpha=0.7, label=f'Group {group}'
+            )
+        else:
+            ax.scatter(
+                X_pca[mask, 0], X_pca[mask, 1], X_pca[mask, 2],
+                c=[color], s=50, alpha=0.7, label=f'Group {group}'
+            )
+
+    ax.set_xlabel(f'PC1 ({var_explained[0]:.1%})')
+    ax.set_ylabel(f'PC2 ({var_explained[1]:.1%})')
+    ax.set_zlabel(f'PC3 ({var_explained[2]:.1%})')
+    ax.set_title(title)
+    ax.legend()
+
+    if dilution_factors is not None:
+        fig.colorbar(scatter, ax=ax, label='Dilution Factor', shrink=0.5)
+
+    return fig
+
+
+def plot_tsne_2d(
+    X: np.ndarray,
+    y: np.ndarray,
+    perplexity: int = 30,
+    title: str = "t-SNE Visualization",
+    figsize: Tuple[int, int] = (10, 8)
+) -> plt.Figure:
+    """
+    Create t-SNE visualization.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix
+    y : np.ndarray
+        Group labels
+    perplexity : int
+        t-SNE perplexity parameter
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    # Perform t-SNE
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+    X_tsne = tsne.fit_transform(X)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    unique_groups = np.unique(y)
+    colors = plt.cm.Set1(np.linspace(0, 1, len(unique_groups)))
+
+    for group, color in zip(unique_groups, colors):
+        mask = y == group
+        ax.scatter(X_tsne[mask, 0], X_tsne[mask, 1],
+                  c=[color], s=50, alpha=0.7, label=f'Group {group}')
+
+    ax.set_xlabel('t-SNE 1')
+    ax.set_ylabel('t-SNE 2')
+    ax.set_title(title)
+    ax.legend()
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_forest(
+    effect_sizes: np.ndarray,
+    ci_lower: np.ndarray,
+    ci_upper: np.ndarray,
+    biomarker_names: List[str] = None,
+    title: str = "Forest Plot - Effect Sizes",
+    figsize: Tuple[int, int] = (10, 12)
+) -> plt.Figure:
+    """
+    Create a forest plot for effect sizes with confidence intervals.
+
+    Parameters:
+    -----------
+    effect_sizes : np.ndarray
+        Point estimates of effect sizes
+    ci_lower : np.ndarray
+        Lower confidence interval bounds
+    ci_upper : np.ndarray
+        Upper confidence interval bounds
+    biomarker_names : list, optional
+        Names of biomarkers
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    n_biomarkers = len(effect_sizes)
+
+    if biomarker_names is None:
+        biomarker_names = [f'Biomarker {i+1}' for i in range(n_biomarkers)]
+
+    # Sort by effect size
+    sorted_idx = np.argsort(effect_sizes)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    y_positions = np.arange(n_biomarkers)
+
+    # Plot confidence intervals
+    for i, idx in enumerate(sorted_idx):
+        color = 'red' if effect_sizes[idx] > 0 else 'blue'
+        ax.plot([ci_lower[idx], ci_upper[idx]], [i, i],
+                color=color, linewidth=2, alpha=0.7)
+        ax.scatter(effect_sizes[idx], i, color=color, s=80, zorder=5)
+
+    # Reference line at zero
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([biomarker_names[i] for i in sorted_idx])
+    ax.set_xlabel('Effect Size (Cohen\'s d)')
+    ax.set_title(title)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_heatmap_clustered(
+    X: np.ndarray,
+    y: np.ndarray = None,
+    biomarker_names: List[str] = None,
+    sample_names: List[str] = None,
+    cluster_rows: bool = True,
+    cluster_cols: bool = True,
+    title: str = "Clustered Heatmap",
+    figsize: Tuple[int, int] = (12, 10)
+) -> plt.Figure:
+    """
+    Create a clustered heatmap of biomarker data.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (samples x biomarkers)
+    y : np.ndarray, optional
+        Group labels for annotation
+    biomarker_names : list, optional
+        Names of biomarkers
+    sample_names : list, optional
+        Names of samples
+    cluster_rows : bool
+        Whether to cluster rows
+    cluster_cols : bool
+        Whether to cluster columns
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    from scipy.cluster.hierarchy import dendrogram, linkage
+    from scipy.spatial.distance import pdist
+
+    n_samples, n_biomarkers = X.shape
+
+    if biomarker_names is None:
+        biomarker_names = [f'B{i+1}' for i in range(n_biomarkers)]
+    if sample_names is None:
+        sample_names = [f'S{i+1}' for i in range(n_samples)]
+
+    # Standardize data for visualization
+    X_std = (X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-10)
+
+    # Clustering
+    if cluster_rows:
+        row_linkage = linkage(pdist(X_std), method='average')
+        row_order = dendrogram(row_linkage, no_plot=True)['leaves']
+    else:
+        row_order = list(range(n_samples))
+
+    if cluster_cols:
+        col_linkage = linkage(pdist(X_std.T), method='average')
+        col_order = dendrogram(col_linkage, no_plot=True)['leaves']
+    else:
+        col_order = list(range(n_biomarkers))
+
+    # Reorder data
+    X_ordered = X_std[row_order, :][:, col_order]
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Create heatmap
+    im = ax.imshow(X_ordered, aspect='auto', cmap='RdBu_r',
+                   vmin=-3, vmax=3)
+
+    # Labels
+    ax.set_xticks(np.arange(n_biomarkers))
+    ax.set_xticklabels([biomarker_names[i] for i in col_order], rotation=45, ha='right')
+
+    if n_samples <= 50:
+        ax.set_yticks(np.arange(n_samples))
+        ax.set_yticklabels([sample_names[i] for i in row_order])
+    else:
+        ax.set_yticks([])
+
+    ax.set_title(title)
+
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax, shrink=0.7)
+    cbar.set_label('Z-score')
+
+    # Add group annotation if provided
+    if y is not None:
+        # Create color bar for groups
+        group_colors = plt.cm.Set1(y[row_order] / (max(y) + 1))
+        for i, color in enumerate(group_colors):
+            ax.add_patch(plt.Rectangle((-1.5, i - 0.5), 0.8, 1,
+                                       facecolor=color, edgecolor='none'))
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_method_comparison_radar(
+    metrics_dict: Dict[str, Dict[str, float]],
+    metric_names: List[str] = None,
+    title: str = "Method Comparison",
+    figsize: Tuple[int, int] = (10, 10)
+) -> plt.Figure:
+    """
+    Create a radar/spider plot comparing methods across multiple metrics.
+
+    Parameters:
+    -----------
+    metrics_dict : dict
+        {method_name: {metric_name: value}}
+    metric_names : list, optional
+        List of metrics to include
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    methods = list(metrics_dict.keys())
+
+    if metric_names is None:
+        metric_names = list(metrics_dict[methods[0]].keys())
+
+    n_metrics = len(metric_names)
+
+    # Calculate angles for radar chart
+    angles = np.linspace(0, 2 * np.pi, n_metrics, endpoint=False).tolist()
+    angles += angles[:1]  # Complete the loop
+
+    fig, ax = plt.subplots(figsize=figsize, subplot_kw=dict(projection='polar'))
+
+    colors = plt.cm.Set2(np.linspace(0, 1, len(methods)))
+
+    for method, color in zip(methods, colors):
+        values = [metrics_dict[method].get(m, 0) for m in metric_names]
+        values += values[:1]  # Complete the loop
+
+        ax.plot(angles, values, 'o-', linewidth=2, color=color, label=method)
+        ax.fill(angles, values, alpha=0.25, color=color)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(metric_names)
+    ax.set_title(title)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_dilution_distribution_comparison(
+    dilution_data: Dict[str, np.ndarray],
+    title: str = "Dilution Factor Distributions",
+    figsize: Tuple[int, int] = (12, 6)
+) -> plt.Figure:
+    """
+    Compare dilution factor distributions from different models.
+
+    Parameters:
+    -----------
+    dilution_data : dict
+        {distribution_name: dilution_factors_array}
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    n_distributions = len(dilution_data)
+
+    fig, axes = plt.subplots(1, n_distributions, figsize=figsize, sharey=True)
+
+    if n_distributions == 1:
+        axes = [axes]
+
+    colors = plt.cm.Set2(np.linspace(0, 1, n_distributions))
+
+    for ax, (name, factors), color in zip(axes, dilution_data.items(), colors):
+        ax.hist(factors, bins=30, color=color, alpha=0.7, edgecolor='black')
+        ax.axvline(np.mean(factors), color='red', linestyle='--',
+                   label=f'Mean: {np.mean(factors):.3f}')
+        ax.axvline(np.median(factors), color='blue', linestyle=':',
+                   label=f'Median: {np.median(factors):.3f}')
+        ax.set_xlabel('Dilution Factor')
+        ax.set_title(name)
+        ax.legend(fontsize=8)
+
+    axes[0].set_ylabel('Count')
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    return fig
+
+
+def plot_power_curve(
+    effect_sizes: np.ndarray,
+    sample_sizes: np.ndarray,
+    alpha: float = 0.05,
+    title: str = "Power Analysis",
+    figsize: Tuple[int, int] = (10, 8)
+) -> plt.Figure:
+    """
+    Plot power curves for different effect sizes and sample sizes.
+
+    Parameters:
+    -----------
+    effect_sizes : np.ndarray
+        Array of effect sizes to evaluate
+    sample_sizes : np.ndarray
+        Array of sample sizes per group
+    alpha : float
+        Significance level
+    title : str
+        Plot title
+    figsize : tuple
+        Figure size
+
+    Returns:
+    --------
+    plt.Figure
+        Matplotlib figure
+    """
+    from biomarker_dilution_sim import power_analysis
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    colors = plt.cm.viridis(np.linspace(0, 1, len(effect_sizes)))
+
+    for es, color in zip(effect_sizes, colors):
+        powers = [power_analysis(es, n, alpha) for n in sample_sizes]
+        ax.plot(sample_sizes, powers, 'o-', color=color,
+                label=f'd = {es:.2f}', linewidth=2)
+
+    ax.axhline(y=0.8, color='red', linestyle='--', alpha=0.5, label='80% power')
+    ax.set_xlabel('Sample Size per Group')
+    ax.set_ylabel('Statistical Power')
+    ax.set_title(title)
+    ax.legend()
+    ax.set_ylim([0, 1])
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
 if __name__ == "__main__":
     # Visualize dilution impact
     fig1 = visualize_dilution_impact()
     fig1.savefig('dilution_impact.png')
-    
+
     # Visualize normalization methods
     fig2 = visualize_normalization_methods()
     fig2.savefig('normalization_methods.png')
-    
+
     # Visualize dilution recovery
     fig3 = visualize_dilution_recovery()
     fig3.savefig('dilution_recovery.png')
-    
+
     plt.show()

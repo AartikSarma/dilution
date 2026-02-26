@@ -10,9 +10,13 @@ import time
 import argparse
 from pathlib import Path
 
-# Import the simulation module
-# Assuming the previous code is saved in a module named 'biomarker_dilution_sim'
+# Import simulation modules
 from biomarker_dilution_sim import *
+from visualization_module import *
+from data_io import (
+    SimulationConfig, ExperimentTracker, ReproducibilityManager,
+    save_results, results_to_dataframe, create_experiment
+)
 
 def run_demo_simulation():
     """
@@ -245,15 +249,189 @@ def analyze_simulation_results(results_file):
     return df
 
 
+def run_enhanced_simulation(config_file: str = None):
+    """
+    Run an enhanced simulation with all new features.
+    """
+    print("Running enhanced simulation with new features...")
+
+    # Setup experiment tracking
+    tracker, config, repro = create_experiment(
+        name="enhanced_simulation",
+        config=config_file,
+        seed=42
+    )
+
+    try:
+        # Get simulation parameters
+        params = config.get_simulation_params()
+        print(f"Simulation parameters: {params}")
+
+        # Generate dataset with new dilution model options
+        dataset = generate_dataset(**params)
+
+        tracker.log_metric('n_samples', len(dataset['y']))
+        tracker.log_metric('n_biomarkers', dataset['X_true'].shape[1])
+
+        # Test new normalization methods
+        print("\nTesting normalization methods...")
+        norm_methods = ['none', 'total_sum', 'pqn', 'clr', 'median', 'vsn', 'quantile']
+
+        results = run_single_simulation(params, norm_methods)
+
+        # Log metrics for each normalization method
+        for method in norm_methods:
+            if method in results['univariate']:
+                tracker.log_metric(f'{method}_power', results['univariate'][method]['power'])
+                tracker.log_metric(f'{method}_type_i_error', results['univariate'][method]['type_i_error'])
+
+        # Test enhanced statistical analysis
+        print("\nRunning enhanced statistical analysis...")
+        X_obs = dataset['X_obs']
+        y = dataset['y']
+
+        # Multiple testing correction
+        p_values, _ = analyze_univariate(X_obs, y, 't_test')
+        p_adjusted, significant = multiple_testing_correction(p_values, 'fdr_bh')
+        print(f"  Significant biomarkers (FDR < 0.05): {np.sum(significant)}")
+
+        # Effect sizes
+        effect_sizes = calculate_effect_size(X_obs, y, 'cohens_d')
+        print(f"  Mean absolute effect size: {np.mean(np.abs(effect_sizes)):.3f}")
+
+        # Bootstrap confidence intervals
+        es_point, es_lower, es_upper = bootstrap_confidence_interval(
+            X_obs, y, lambda x, y: calculate_effect_size(x, y, 'cohens_d'),
+            n_bootstrap=100
+        )
+        print(f"  Effect size 95% CI width: {np.mean(es_upper - es_lower):.3f}")
+
+        # Test advanced ML methods
+        print("\nTesting advanced ML methods...")
+        ml_methods = ['logistic', 'random_forest', 'gradient_boosting']
+
+        for ml_method in ml_methods:
+            cv_results = cross_validate_classification(X_obs, y, ml_method, n_folds=5)
+            accuracy = cv_results['summary'].get('accuracy_mean', 0)
+            print(f"  {ml_method}: Accuracy = {accuracy:.3f}")
+            tracker.log_metric(f'ml_{ml_method}_accuracy', accuracy)
+
+        # Test feature selection
+        print("\nTesting feature selection...")
+        selected_features, importances = feature_selection(X_obs, y, method='random_forest', n_features=5)
+        print(f"  Selected features: {selected_features}")
+
+        # Generate visualizations
+        print("\nGenerating visualizations...")
+
+        # Volcano plot
+        enhanced_results = analyze_univariate_enhanced(X_obs, y)
+        if 'fold_changes' in enhanced_results:
+            fig_volcano = plot_volcano(
+                enhanced_results['fold_changes'],
+                enhanced_results['p_values'],
+                title="Volcano Plot - Enhanced Analysis"
+            )
+            tracker.save_artifact('volcano_plot', fig_volcano, 'figure')
+            plt.close(fig_volcano)
+
+        # 3D PCA
+        fig_3d = plot_pca_3d(X_obs, y, dataset['dilution_factors'])
+        tracker.save_artifact('pca_3d', fig_3d, 'figure')
+        plt.close(fig_3d)
+
+        # Forest plot
+        fig_forest = plot_forest(effect_sizes, es_lower, es_upper)
+        tracker.save_artifact('forest_plot', fig_forest, 'figure')
+        plt.close(fig_forest)
+
+        # Save results
+        tracker.save_artifact('results', results, 'pickle')
+
+        # Finish experiment
+        tracker.finish('completed')
+        print(f"\nExperiment completed! Results saved to: {tracker.get_output_dir()}")
+
+        return results
+
+    except Exception as e:
+        tracker.finish('failed')
+        print(f"Experiment failed: {e}")
+        raise
+
+
+def run_dilution_model_comparison():
+    """
+    Compare different dilution models.
+    """
+    print("Comparing dilution models...")
+
+    n_subjects = 200
+    dilution_models = {
+        'beta_mild': generate_dilution_factors(n_subjects, 8.0, 2.0, 'beta'),
+        'beta_severe': generate_dilution_factors(n_subjects, 2.0, 8.0, 'beta'),
+        'bimodal': generate_dilution_factors(n_subjects, 5.0, 5.0, 'bimodal'),
+        'mixture': generate_dilution_factors(n_subjects, 5.0, 5.0, 'mixture'),
+        'uniform': generate_dilution_factors(n_subjects, 5.0, 5.0, 'uniform'),
+    }
+
+    # Visualize distributions
+    fig = plot_dilution_distribution_comparison(dilution_models)
+    fig.savefig('dilution_model_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    print("Dilution model comparison saved to 'dilution_model_comparison.png'")
+
+    # Statistics for each model
+    print("\nDilution Model Statistics:")
+    print("-" * 60)
+    for name, factors in dilution_models.items():
+        print(f"{name:15s}: mean={np.mean(factors):.3f}, std={np.std(factors):.3f}, "
+              f"min={np.min(factors):.3f}, max={np.max(factors):.3f}")
+
+    return dilution_models
+
+
+def run_power_analysis_simulation():
+    """
+    Run power analysis for different scenarios.
+    """
+    print("Running power analysis...")
+
+    effect_sizes = np.array([0.2, 0.5, 0.8, 1.0, 1.5])
+    sample_sizes = np.arange(10, 201, 10)
+
+    # Plot power curves
+    fig = plot_power_curve(effect_sizes, sample_sizes)
+    fig.savefig('power_analysis.png', dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    print("Power analysis saved to 'power_analysis.png'")
+
+    # Sample size recommendations
+    print("\nSample size recommendations for 80% power:")
+    print("-" * 40)
+    for es in effect_sizes:
+        n_required = sample_size_estimation(es, power=0.8)
+        print(f"Effect size {es:.1f}: n = {n_required} per group")
+
+    return effect_sizes, sample_sizes
+
+
 def main():
     parser = argparse.ArgumentParser(description='Biomarker Dilution Monte Carlo Simulation')
     parser.add_argument('--mode', type=str, default='demo',
-                        choices=['demo', 'full', 'analyze'],
-                        help='Simulation mode: demo, full, or analyze')
+                        choices=['demo', 'full', 'analyze', 'enhanced', 'dilution', 'power'],
+                        help='Simulation mode')
     parser.add_argument('--results', type=str, help='Results file for analysis')
-    
+    parser.add_argument('--config', type=str, help='Configuration file (YAML or JSON)')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+
     args = parser.parse_args()
-    
+
+    # Set random seed
+    np.random.seed(args.seed)
+
     if args.mode == 'demo':
         results = run_demo_simulation()
     elif args.mode == 'full':
@@ -263,6 +441,12 @@ def main():
             print("Error: --results file path is required for analyze mode")
             return
         df = analyze_simulation_results(args.results)
+    elif args.mode == 'enhanced':
+        results = run_enhanced_simulation(args.config)
+    elif args.mode == 'dilution':
+        run_dilution_model_comparison()
+    elif args.mode == 'power':
+        run_power_analysis_simulation()
     else:
         print(f"Unknown mode: {args.mode}")
 
