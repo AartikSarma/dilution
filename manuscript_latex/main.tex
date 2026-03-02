@@ -1,0 +1,796 @@
+% ============================================================
+% main.tex — Biomarker Dilution Simulation Study
+% Target: AJRCCM Original Article (~4500 words, structured abstract)
+% ============================================================
+\documentclass[12pt]{article}
+\setlength{\parindent}{0in}
+% --- Page layout ---
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\doublespacing
+
+% --- Line numbering ---
+\usepackage{lineno}
+\linenumbers
+
+% --- Mathematics ---
+\usepackage{amsmath,amssymb}
+
+% --- Graphics ---
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+
+% --- Tables ---
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{longtable}
+
+% --- Colors (for hyperlinks only) ---
+\usepackage[dvipsnames]{xcolor}
+
+% --- Hyperlinks ---
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+% --- Bibliography ---
+\usepackage[numbers,sort&compress]{natbib}
+
+% --- Fonts ---
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx} % Times-compatible serif
+
+% --- Misc ---
+\usepackage{textcomp}
+\usepackage{url}
+\usepackage{enumerate}
+
+% --- Custom commands ---
+\newcommand{\Xobs}{\mathbf{X}_{\mathrm{obs}}}
+\newcommand{\Xtrue}{\mathbf{X}_{\mathrm{true}}}
+\newcommand{\Rtrue}{\mathbf{R}_{\mathrm{true}}}
+\newcommand{\Robs}{\mathbf{R}_{\mathrm{obs}}}
+
+% ============================================================
+\begin{document}
+
+% --- Title page ---
+\begin{titlepage}
+\begin{center}
+\vspace*{2cm}
+
+{\Large\bfseries Sample Dilution Systematically Distorts Biomarker Discovery in Lower Respiratory Tract Fluid: A Simulation Framework with Empirical Validation}
+
+\vspace{1.5cm}
+
+Aartik Sarma, MD MAS\textsuperscript{1}
+
+\vspace{1cm}
+
+\textsuperscript{1}Department of Medicine, University of California, San Francisco
+\newline
+\textsuperscript{2}Joint Program in Computational Precision Health, University of California, Berkeley, and University of California, San Francisco
+
+\end{center}
+
+\vspace{1.5cm}
+
+\textbf{Corresponding Author:}\\
+Aartik Sarma, MD MAS\\
+Email: aartiksarma@gmail.com
+
+\vspace{1cm}
+
+\textbf{Author Contributions:} A.S. conceived the study, developed the simulation framework, performed all analyses, and wrote the manuscript.
+
+\vspace{1cm}
+
+\textbf{Running Title:} Dilution Distorts BAL Biomarker Discovery
+
+\vspace{0.5cm}
+
+\textbf{Word Count:} Body text: $\sim$4,500 words
+
+\vspace{0.5cm}
+
+\textbf{This article has an online supplement.}
+
+
+\end{titlepage}
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\section*{Abstract}
+
+\textbf{Rationale:} Bronchoalveolar lavage (BAL) fluid is indispensable for investigating pulmonary diseases, yet specimens are subject to variable and uncontrolled dilution during collection. How this dilution variability distorts biomarker discovery across different analytical approaches---and whether computational normalization can reliably mitigate these distortions---remains poorly quantified.
+
+\textbf{Objectives:} To systematically evaluate the impact of sample dilution on biomarker discovery across six analytical domains and to compare seven normalization strategies under realistic dilution scenarios.
+
+\textbf{Methods:} We developed a Monte Carlo simulation framework modeling proportional dilution via Beta distributions at three severity levels (mild, moderate, severe). We evaluated seven normalization methods---none, total sum, probabilistic quotient normalization (PQN), centered log-ratio (CLR), median, quantile, and reference biomarker---across univariate hypothesis testing, correlation recovery, principal component analysis (PCA), clustering, classification, feature selection, and distance matrix recovery ($\geq$20 replications per condition). We extended analyses to high-dimensional settings ($p$ up to 500 biomarkers), decomposed CLR-associated Type~I error inflation, evaluated batch--dilution interactions, and systematically assessed the interaction between limit-of-detection (LOD) censoring severity (5--50\%) and five imputation methods including MICE. We validated simulation predictions by reanalyzing published BAL biomarker data from the Pediatric Intensive Care FLU (PICFLU) cohort.
+
+\textbf{Measurements and Main Results:} Dilution attenuated effect sizes by $\sim$23\% and reduced statistical power from 97.5\% to 87.1\% under severe conditions without normalization. CLR and PQN maintained power above 99\% but exhibited markedly elevated Type~I error rates (78--80\% and 63--66\%, respectively). We demonstrate that CLR's Type~I error inflation arises from zero-sum constraints that violate independence assumptions of standard parametric tests; permutation-based testing restores nominal Type~I error while preserving power gains. In high-dimensional settings ($p=500$), false discovery rate correction partially compensated for CLR-inflated Type~I error but at the cost of reduced sensitivity. Reanalysis of PICFLU cohort BAL data confirmed that normalization choice materially altered which biomarkers reached statistical significance, consistent with simulation predictions.
+
+\textbf{Conclusions:} Sample dilution differentially distorts biomarker discovery depending on the analytical domain. No single normalization method is universally optimal: CLR and PQN maximize sensitivity for classification and clustering, while unnormalized data preserves specificity. Researchers should report results under multiple normalization approaches, and the simulation framework presented here provides a tool for study-specific evaluation.
+
+\textbf{Keywords:} biomarker dilution, bronchoalveolar lavage, normalization, simulation, compositional data analysis, statistical power
+
+\vspace{0.5cm}
+\noindent\textbf{At a Glance Commentary}
+
+\noindent\textit{Scientific Knowledge on the Subject:} BAL fluid biomarker concentrations are confounded by variable specimen dilution. Existing dilution markers (urea, albumin, total protein) are unreliable, and no systematic evaluation has quantified how dilution distorts discovery across multiple analytical domains.
+
+\noindent\textit{What This Study Adds to the Field:} Through Monte Carlo simulation and empirical validation, we demonstrate that dilution effects are domain-specific, with no universally optimal normalization strategy. We provide quantitative guidance for normalization selection based on analytical goals and show that reporting results under multiple normalization approaches is essential for robust BAL biomarker discovery.
+
+\newpage
+
+% ============================================================
+% INTRODUCTION
+% ============================================================
+\section{Introduction}
+\setlength{\parindent}{0.5in}
+
+There is a growing recognition these inflammatory responses are compartmentalized. 
+
+Biomarker discovery in biological fluids is a cornerstone of precision medicine, enabling disease diagnosis, prognosis, and treatment monitoring~\cite{Biomarkers2001,Califf2018}. Lower respiratory tract specimens---including bronchoalveolar lavage (BAL) fluid, tracheal aspirates, and induced sputum---are particularly valuable for investigating pulmonary diseases, respiratory infections, and airway inflammation~\cite{Meyer2007,Meyer2012,Haslam1999}. BAL has been instrumental in characterizing the pathobiology of acute respiratory distress syndrome (ARDS)~\cite{Matthay2019,Ware2013}, identifying inflammatory phenotypes~\cite{Calfee2014}, and discovering novel therapeutic targets such as ADAMTS4 in influenza-associated lung injury~\cite{Boyd2020}.
+
+However, BAL specimens share a fundamental analytical challenge: variable and uncontrolled dilution during collection. During bronchoscopic lavage, sterile saline is instilled into the lung and then aspirated; the recovered fluid represents an unknown mixture of instilled saline and epithelial lining fluid (ELF), with recovery volumes varying substantially between patients and even between sequential aliquots within the same procedure~\cite{Rennard1986,Baughman2007}. This dilution variability means that measured biomarker concentrations reflect both the true biological signal and a specimen-specific dilution artifact that is neither measured nor controlled.
+
+The traditional approach to correcting BAL dilution has relied on endogenous dilution markers---substances assumed to maintain constant concentrations in ELF, allowing back-calculation of the true ELF volume recovered. Urea was the first proposed marker~\cite{Rennard1986}, followed by albumin and total protein. However, a recent comprehensive evaluation by Haeger et al.\ demonstrated that all commonly used dilution markers are unreliable: urea equilibrates rapidly across the alveolar membrane during the lavage procedure itself, albumin concentrations change with lung injury, and total protein varies with disease state~\cite{Haeger2024}. Surfactant protein D (SP-D) has been proposed as a more reliable alternative given its exclusive pulmonary production~\cite{Haeger2024,Chakrabarti2022,More2010}, but validation remains limited. The validity of dilution markers has also been questioned in pediatric small-volume lavage~\cite{Dargaville1999}.
+
+Several approaches have been proposed to account for this variation, but each has significant limitaitons when used to study critically ill patients. One common approach is to normalize biomarker concentrations is to divide the biomarker concentration by albumin or total protein concentrations. However, protein leak into the alveolar space is a characteristic of acute respiratory distress syndrome, so protein concentrations are, by definition, a limited reference standard. Plasma urea was proposed as an alternative reference based on the hypothesis that urea freely diffuses between blood and the respiratory tract; subsequent research found urea transporters in the respiratory epithelium, urea production by activated neutrophils, and differences in urea concentrations of patients with healthy lungs vs. COPD lungs. More recent research has identified SP-D as a canddate biomarker for normalization, but surfactant produciton is also impoaired in lung injury.
+
+An alternative approach bypasses biological dilution markers entirely, instead applying computational normalization methods developed in genomics and metabolomics. Probabilistic quotient normalization (PQN), originally developed for NMR metabolomics~\cite{Dieterle2006}, estimates sample-specific dilution factors from the data itself. The centered log-ratio (CLR) transformation from compositional data analysis treats all biomarker data as inherently compositional, eliminating the dilution factor algebraically~\cite{Aitchison1986,Gloor2017,Fernandes2014}. Quantile normalization~\cite{Bolstad2003}, median scaling, and other approaches have been benchmarked extensively in metabolomics~\cite{Lu2025,Wang2018,Li2017,Valikangas2018,Chawade2014,VanDenBerg2006} and RNA-seq~\cite{Risso2014}, but their performance under the specific dilution characteristics of BAL has not been systematically evaluated.
+
+Despite the importance of this problem, a critical gap exists: no study has systematically quantified how dilution distorts biomarker discovery \emph{across multiple analytical domains}---from univariate testing through multivariate classification---or evaluated whether normalization methods that improve performance in one domain may degrade it in another. This gap has direct clinical consequences: the choice of normalization can determine which biomarkers are identified as significant, which panels are selected for validation, and ultimately which candidates advance toward clinical translation.
+
+In this study, we address this gap through a comprehensive Monte Carlo simulation framework that models realistic BAL dilution scenarios and evaluates seven normalization methods across six analytical domains. We extend our simulations to high-dimensional settings, decompose the mechanistic basis of CLR-associated Type~I error inflation, evaluate batch--dilution interactions, and validate our simulation predictions using published BAL data from the Pediatric Intensive Care FLU (PICFLU) cohort~\cite{Boyd2020,Randolph2011,Hall2013}. Our findings provide domain-specific recommendations for normalization strategy selection and quantitative guidance for BAL biomarker study design.
+
+% ============================================================
+% METHODS
+% ============================================================
+\section{Methods}
+
+\subsection{Simulation Framework Overview}
+
+We developed a modular simulation framework in Python that generates synthetic biomarker datasets with known ground truth, applies controlled dilution, evaluates normalization methods, and assesses performance across multiple analytical domains. All random seeds were fixed for reproducibility. Complete code is available at the project repository under the MIT License.
+
+\subsection{Data Generation}
+
+\subsubsection{True Biomarker Concentrations}
+
+For each simulation replicate, we generated true biomarker concentration matrices $\Xtrue \in \mathbb{R}^{n \times p}$ from multivariate log-normal distributions, where $n$ is the number of subjects and $p$ is the number of biomarkers. Log-normal distributions were chosen to reflect the right-skewed concentration distributions typically observed in biological fluids.
+
+Group means were generated with specified effect sizes (Cohen's $d$~\cite{Cohen1988}), with approximately 70\% of biomarkers exhibiting differential expression between groups. The remaining 30\% served as null biomarkers for Type~I error assessment. Biomarker-level variances spanned several orders of magnitude ($10^{-1}$ to $10^{3}$) to reflect the dynamic range observed in proteomic and metabolomic datasets. Inter-biomarker correlations were modeled using a moderate block correlation structure ($\rho = 0.5$).
+
+\subsubsection{Dilution Model}
+
+Dilution factors $d_i$ for each subject $i$ were drawn from Beta distributions:
+\begin{equation}
+d_i \sim \text{Beta}(\alpha, \beta)
+\end{equation}
+
+Three severity levels were defined to span the range of dilution encountered in clinical BAL procedures:
+\begin{itemize}
+\item \textbf{Mild:} Beta(8, 2), mean $\approx 0.80$, representing well-controlled specimen collection
+\item \textbf{Moderate:} Beta(5, 5), mean $\approx 0.50$, representing typical clinical variability
+\item \textbf{Severe:} Beta(2, 8), mean $\approx 0.20$, representing highly variable collections with poor fluid recovery
+\end{itemize}
+
+The observed biomarker matrix was computed as:
+\begin{equation}
+\Xobs[i, j] = d_i \times \Xtrue[i, j]
+\end{equation}
+
+This multiplicative model reflects the assumption that dilution affects all analytes in a sample proportionally---a reasonable first approximation for specimens where dilution occurs at the point of collection. We additionally evaluated bimodal, mixture, and uniform dilution distributions to assess sensitivity to distributional assumptions.
+
+\subsubsection{Limits of Detection}
+
+Limits of detection (LOD) were set at the 10th percentile of each biomarker's observed distribution. Values below LOD were substituted with LOD$/\sqrt{2}$, a standard approach in environmental and clinical chemistry~\cite{Hornung1990}.
+
+\subsection{Normalization Methods}
+
+Seven normalization approaches were evaluated:
+\begin{enumerate}
+\item \textbf{None:} Raw observed concentrations (baseline)
+\item \textbf{Total sum:} $x_{ij}^{\mathrm{norm}} = x_{ij} / \sum_{j} x_{ij}$
+\item \textbf{PQN:} Reference spectrum (median across samples), sample-specific quotients, normalization by median quotient~\cite{Dieterle2006}
+\item \textbf{CLR:} $\mathrm{clr}(\mathbf{x}_i)_j = \ln(x_{ij}) - \frac{1}{p} \sum_{k} \ln(x_{ik})$~\cite{Aitchison1986}
+\item \textbf{Median:} Division by sample median
+\item \textbf{Quantile:} Forces identical distributions across samples~\cite{Bolstad2003}
+\item \textbf{Reference biomarker:} Normalization by a selected reference biomarker
+\end{enumerate}
+
+\subsection{Analysis Domains and Evaluation Metrics}
+
+\subsubsection{Univariate Hypothesis Testing}
+
+Two-sample $t$-tests were performed for each biomarker comparing group means. We computed statistical power (proportion of truly differential biomarkers correctly identified at $p < 0.05$) and Type~I error rate (proportion of null biomarkers incorrectly identified). Multiple testing correction was applied using the Benjamini--Hochberg false discovery rate (FDR) procedure~\cite{Benjamini1995}.
+
+\subsubsection{Correlation Structure Recovery}
+
+We compared estimated correlation matrices from observed (normalized) data to true correlation matrices using the Frobenius norm ($\|\Rtrue - \Robs\|_F$) and rank correlation (Spearman correlation between vectorized upper-triangular elements).
+
+\subsubsection{PCA Structure Preservation}
+
+Structure preservation was quantified using the RV coefficient~\cite{Robert1976}, a multivariate generalization of the squared Pearson correlation, comparing PCA subspaces of true and observed data.
+
+\subsubsection{Unsupervised Clustering}
+
+$K$-means clustering was applied with the true number of groups specified. Clustering quality was assessed using the adjusted Rand index (ARI)~\cite{Hubert1985}.
+
+\subsubsection{Supervised Classification}
+
+Three classifiers were evaluated: logistic regression (L2-regularized), random forest~\cite{Breiman2001} (100 trees), and gradient boosting (100 estimators). Performance was assessed via 5-fold cross-validation.
+
+\subsubsection{Feature Selection}
+
+Three methods were evaluated: LASSO~\cite{Tibshirani1996} (L1-regularized logistic regression), random forest feature importance, and mutual information. Stability was quantified by Jaccard similarity between features selected from observed and true data.
+
+\subsubsection{Distance Matrix Recovery}
+
+We evaluated how dilution distorts pairwise distance matrices, which underlie clustering, ordination, and PERMANOVA analyses. Seven distance metrics were compared: (1)~Euclidean distance on raw/normalized data; (2)~Bray--Curtis dissimilarity (computed on non-negative data only); (3)~Aitchison distance (Euclidean distance in CLR-transformed space); (4)~cosine distance ($1 - \cos\theta$, where $\theta$ is the angle between sample vectors); (5)~Manhattan distance (L1 norm); (6)~Canberra distance (a weighted version of Manhattan that normalizes by the magnitude of each feature, computed on non-negative data only); and (7)~Mahalanobis distance (Euclidean distance in the space defined by the inverse covariance matrix). Distance matrix fidelity was assessed by the Mantel test (Pearson correlation between vectorized upper triangles of true and observed distance matrices, with 199 permutations for significance) and Spearman rank correlation. Group separation in distance space was quantified using PERMANOVA pseudo-$R^2$ (fraction of total sum of squared distances attributable to between-group variation) with permutation-based significance testing. Aitchison distance is theoretically invariant to proportional dilution because the CLR transformation cancels the multiplicative dilution factor algebraically. Cosine distance is also theoretically invariant to proportional dilution because it measures the angle between vectors, which is unchanged by scalar multiplication; it thus provides a simpler alternative to Aitchison distance that does not require a log transformation. Bray--Curtis and Canberra offer partial protection through their ratio-based formulations. Manhattan distance, like Euclidean distance, is fully susceptible to proportional scaling. Mahalanobis distance accounts for feature correlations but is sensitive to dilution-induced changes in the covariance structure. Invalid combinations were excluded: Bray--Curtis and Canberra were not applied to CLR-transformed data (which contains negative values), and Aitchison distance was not applied to CLR-transformed data (double transformation is meaningless).
+
+\subsection{Simulation Design}
+
+The primary simulation compared 7 normalization methods $\times$ 3 dilution severities $\times$ 20 replications, using $n = 100$ subjects, $p = 10$ biomarkers, 2 groups, moderate correlation, Cohen's $d = 0.8$, and log-normal distributions.
+
+Secondary analyses evaluated:
+\begin{itemize}
+\item \textbf{Sample size $\times$ effect size interaction:} $n \in \{30, 50, 100, 200\}$, $d \in \{0.2, 0.5, 0.8, 1.2\}$, 10 replications each
+\item \textbf{ML robustness:} 3 classifiers $\times$ 4 dilution levels $\times$ 3 normalizations $\times$ 10 replications
+\item \textbf{Feature selection stability:} 3 methods $\times$ 3 severities $\times$ 3 normalizations $\times$ 15 replications
+\item \textbf{Power analysis:} 5 sample sizes $\times$ 3 dilution levels $\times$ 3 normalizations $\times$ 10 replications
+\end{itemize}
+
+\subsection{Extended Analyses}
+
+\subsubsection{High-Dimensional Extension}
+
+We evaluated normalization performance with $p \in \{50, 100, 500\}$ biomarkers under moderate dilution, using block correlation structures to test how FDR correction interacts with dilution at high dimensionality.
+
+\subsubsection{CLR Type~I Error Decomposition}
+
+To investigate CLR's elevated Type~I error, we generated null datasets (zero effect size for all biomarkers), applied CLR followed by standard $t$-tests, and compared Type~I error to CLR followed by permutation-based testing (10,000 permutations). QQ-plots were generated comparing observed $p$-value distributions to the expected uniform distribution.
+
+\subsubsection{Batch--Dilution Interaction}
+
+We generated data with both dilution and batch effects, comparing dilution-only correction, batch-only correction (ComBat~\cite{Johnson2007}), and combined correction.
+
+\subsubsection{Limit of Detection Sensitivity Analysis}
+
+Many BAL biomarker measurements fall below the assay's lower limit of detection (LOD), and the proportion of censored values and the imputation strategy used may interact with normalization performance. We systematically varied the fraction of values below the LOD (5\%, 10\%, 20\%, 30\%, 50\%) and applied five imputation methods: (1)~zero substitution; (2)~LOD/2; (3)~LOD/$\sqrt{2}$ (Hornung and Reed, 1990); (4)~substitution with the LOD value itself; and (5)~multiple imputation by chained equations (MICE)~\cite{vanBuuren2011} using scikit-learn's \texttt{IterativeImputer}. All combinations were evaluated under moderate dilution (Beta(5,5)) across all 7 normalization methods with 20 replications each.
+
+\subsubsection{Correlated Reference Biomarker}
+
+In BAL fluid studies, total protein is commonly used as a reference biomarker for dilution correction by dividing each analyte concentration by total protein. However, total protein is not independent of disease: in ARDS, increased alveolar-capillary permeability causes plasma protein to leak into the airspace alongside inflammatory mediators, elevating total protein in disease relative to control. This confounds reference normalization with the biological signal of interest. To quantify this effect, we extended the simulation framework with two new parameters: $\delta_{\text{ref}}$, the fractional increase in the reference biomarker (column~0) mean in the disease group relative to controls (reference group mean in disease $= (1 + \delta_{\text{ref}}) \times$ control mean), and $\rho_{\text{ref}}$, the correlation between the reference biomarker and all analytes (set in the correlation matrix with positive-definiteness ensured via eigenvalue clipping). We swept $\delta_{\text{ref}} \in \{0.0, 0.25, 0.5, 0.75, 1.0\}$ and $\rho_{\text{ref}} \in \{0.0, 0.3, 0.5, 0.7, 0.9\}$ under moderate dilution (Beta(5,5)) with log-normal data, $n = 100$ subjects, $p = 10$ biomarkers, effect size $d = 0.8$, and 20 replications per condition ($5 \times 5 \times 20 = 500$ datasets, each evaluated under 7 normalization methods). Each replicate was assessed for statistical power, Type~I error, PERMANOVA $R^2$ (Euclidean distance, 199 permutations), clustering ARI, and 5-fold cross-validated classification accuracy.
+
+\subsection{Empirical Validation: PICFLU Cohort}
+
+To validate simulation predictions with real data, we reanalyzed published BAL biomarker data from the PICFLU (Pediatric Intensive Care FLU) study~\cite{Boyd2020,Randolph2011}. The PICFLU cohort enrolled critically ill children with influenza across 38 pediatric intensive care units. We obtained supplementary biomarker data from Boyd et al.~\cite{Boyd2020} (Nature, 2020), which includes cytokine and protein measurements in lower respiratory tract fluid. We applied each normalization method to the clinical data and compared which biomarkers reached significance under each approach, assessing concordance with simulation predictions.
+
+\subsection{Empirical Validation: Juss et al. Cohort}
+
+To further validate simulation predictions with an independent dataset, we reanalyzed published BAL biomarker data from Juss et al.~\cite{Juss2016}, who measured 44 analytes in bronchoalveolar lavage fluid from 18 ARDS patients and 10 healthy controls, along with matched blood samples from the same ARDS patients and 18 age- and gender-matched healthy volunteers. This dataset offered several advantages for validation: paired absolute and author-reported protein-corrected BALF concentrations, matched blood samples as a negative control (blood is not subject to BAL dilution), extreme dilution variability (BALF total protein CV $\approx$ 138\%), and ARDS severity subgroups.
+
+We applied six computational normalization methods (none, total sum, PQN, CLR, median, quantile) plus the authors' protein correction as a seventh method to the BALF data. Analytes were excluded if $>$80\% of values fell at or below the lower limit of quantification (LLoQ); below-LLoQ values were substituted with LLoQ/$\sqrt{2}$. Differential analysis (Welch's $t$-test, ARDS vs.\ control) was performed under each normalization, with FDR correction. The blood data served as a negative control: because blood is not subject to BAL dilution, normalization methods should produce more concordant results in blood than in BALF, and discrepancies between methods should be smaller.
+
+For both the PICFLU and Juss cohorts, we also evaluated group separation under each normalization $\times$ distance metric combination using all seven distance metrics (Euclidean, Bray--Curtis, Aitchison, cosine, Manhattan, Canberra, Mahalanobis) with PERMANOVA $R^2$ (999 permutations). Invalid combinations were excluded: Bray--Curtis and Canberra were not applied to CLR-transformed data (which contains negative values), and Aitchison distance was not applied to CLR-transformed data (since Aitchison distance applies CLR internally, making double transformation meaningless). For the Juss cohort, the same distance metric analysis was applied to the blood negative control to test whether distance metric choice matters less in specimens not subject to dilution.
+
+\subsubsection{PCA Preprocessing}
+
+Principal component analysis (PCA) biplots were generated for each normalization method to visualize sample-level clustering. Because per-analyte normality testing (Shapiro--Wilk and D'Agostino--Pearson) classified all analytes as non-normally distributed in both cohorts, data were log-transformed ($\log(X + 10^{-5})$) prior to PCA for all non-CLR methods (CLR already applies a log transformation internally). All data were then centered to zero mean and scaled to unit variance using \texttt{StandardScaler} to prevent high-concentration analytes from dominating principal components. To evaluate the sensitivity of PCA structure to preprocessing choices, we generated comparison figures (Figures~E10b, E14b) showing PCA results under four conditions: raw, log-transformed only, centered + scaled only, and log + centered + scaled, for both unnormalized and CLR-normalized data.
+
+\subsubsection{Disentangling Log Transformation from Compositional Normalization}
+
+Because CLR is the only normalization method that applies a log transformation---all other methods (total sum, PQN, median, quantile) operate on the original concentration scale---it is unclear whether CLR's superior performance in multivariate analyses reflects its compositional normalization properties or simply the variance-stabilizing effect of log-transforming right-skewed biomarker data. To disentangle these contributions, we created log-transformed variants of each non-CLR normalization method by applying $\log(X + \epsilon)$ (with $\epsilon = 10^{-5}$) to the normalized data, and repeated both differential analysis (Welch's $t$-test) and PERMANOVA $R^2$ (Euclidean distance, 999 permutations) for each method on both the original and log-transformed scales. A simple log transformation of raw data (without any normalization) was also evaluated. We compared these results against CLR to isolate the compositional centering component of CLR's effect.
+
+\subsubsection{Per-Analyte Normality Testing and Stratified Log-Transform Analysis}
+
+To validate the simulation prediction that the log-transform benefit is distribution-dependent (Figure~E22), we performed per-analyte normality testing on the empirical PICFLU and Juss BALF datasets. For each analyte, we applied both the Shapiro--Wilk test~\cite{Shapiro1965} and the D'Agostino--Pearson omnibus test~\cite{DAgostino1973}. Analytes were classified as ``normal'' if both tests failed to reject at $\alpha = 0.05$, and ``non-normal'' otherwise. The log-transform comparison (Figures~E20, E21) was then repeated separately for each stratum, producing stratified figures (E20b, E21b) that show differential analysis significance counts and PERMANOVA $R^2$ for normal and non-normal analyte subsets. This stratification directly tests whether the benefit of log-transforming normalized data is concentrated among non-normally distributed (right-skewed) analytes, as predicted by the simulation.
+
+\subsubsection{Simulation-Based Distribution $\times$ Scale Sensitivity Analysis}
+
+To further disentangle the log-transform effect from compositional normalization, we extended the simulation framework to a factorial design crossing data-generating distribution (normal vs.\ log-normal) with analysis scale (raw vs.\ log-transformed). For each of six normalization methods (none, total sum, PQN, CLR, median, quantile), three dilution severities (mild, moderate, severe), and two distributions, we generated 20 replicate datasets ($n=100$ subjects, $p=10$ biomarkers, effect size $d=0.8$). Non-CLR methods were evaluated on both the original and $\log(X_{\text{norm}} + 10^{-5})$ scales; CLR was evaluated once (already log-transformed). Scale-matched truth references ensured that power and Type~I error were computed against p-values from \emph{the same scale} applied to the undiluted data. Each replicate was assessed for statistical power, Type~I error rate, PERMANOVA $R^2$ (Euclidean distance, 199 permutations), clustering performance (adjusted Rand index), and classification accuracy (5-fold cross-validated logistic regression).
+
+\subsection{Software and Reproducibility}
+
+All simulations were implemented in Python 3.11 using NumPy, SciPy, scikit-learn, and pandas. Visualizations used Matplotlib and Seaborn. All random seeds were fixed. The complete framework is available at the project repository under the MIT License.
+
+% ============================================================
+% RESULTS
+% ============================================================
+\section{Results}
+
+\subsection{Dilution Factor Distributions}
+
+Six dilution models were compared (Figure~1; Table~1). The three Beta distribution parameterizations spanned a wide range of dilution severities: mild dilution (Beta(8,2)) yielded a mean factor of 0.797 (SD = 0.113), moderate dilution (Beta(5,5)) a mean of 0.490 (SD = 0.149), and severe dilution (Beta(2,8)) a mean of 0.203 (SD = 0.121). These distributions span the range of dilution scenarios encountered in clinical practice, from well-controlled BAL procedures (mild) to highly variable tracheal aspirate collections (severe)~\cite{Rennard1986,Baughman2007}.
+
+\subsection{Impact of Dilution on Biomarker Data}
+
+Figure~2 illustrates the multifaceted distortion introduced by dilution. Observed concentrations were systematically attenuated relative to true values, with attenuation proportional to each sample's dilution factor. PCA revealed that dilution introduces variance along the first principal component, reducing biological group separation. Correlation matrices showed that dilution inflates positive inter-biomarker correlations, as shared dilution factors create spurious co-variation---a phenomenon predicted by Pearson over a century ago~\cite{Pearson1897}.
+
+\subsection{Normalization Method Performance}
+
+The primary simulation results (Figure~3; Table~2) reveal fundamentally different trade-off profiles across normalization methods.
+
+\textbf{Statistical power.} CLR and PQN maintained the highest power across all dilution severities ($>$99\%), followed by unnormalized (97.5\% mild, 87.1\% severe) and quantile-normalized data (97.5\% mild, 85.9\% severe). Total sum normalization achieved intermediate power (90--92\%). Reference biomarker normalization showed the lowest power ($\sim$60\%).
+
+\textbf{Type~I error control.} The power--specificity trade-off was stark. Unnormalized data maintained excellent Type~I error control (0--4.2\%), and quantile normalization was similarly conservative (0--1.2\%). In contrast, CLR exhibited substantially inflated Type~I error (78--80\%), followed by PQN (63--66\%) and median normalization (63--64\%). These elevated rates indicate that normalization methods that effectively remove dilution variation may also amplify noise or introduce compositional artifacts.
+
+\textbf{Correlation recovery.} Unnormalized data achieved the highest rank correlation with the true correlation matrix (0.987 mild, 0.867 severe), while CLR (0.80--0.81) and PQN (0.80) showed stable but lower recovery. Total sum and median normalization showed the poorest correlation recovery (0.59--0.65).
+
+\textbf{PCA structure.} RV coefficients were highest for unnormalized (0.94 mild, 0.47 severe) and quantile-normalized data (0.93 mild, 0.46 severe). CLR (0.36--0.37) and PQN (0.35) yielded lower coefficients, suggesting that while they improve group discrimination, they alter the global variance structure.
+
+\textbf{Clustering.} CLR normalization yielded the best clustering performance (ARI: 0.95--0.98), followed by PQN (0.93--0.95). Unnormalized and quantile-normalized data showed poor clustering (ARI $<$ 0.05), indicating that dilution variation dominates clustering structure when not corrected.
+
+\textbf{Classification.} All methods achieved high accuracy ($>$96\%), with CLR consistently highest ($>$98.7\%). Supervised methods with regularization are relatively robust to dilution.
+
+\subsection{Sample Size and Effect Size Interaction}
+
+Statistical power as a function of sample size and effect size under moderate--severe dilution is shown in Figure~4. At small effect sizes ($d = 0.2$), power remained below 50\% even with $n = 200$ regardless of normalization, indicating that dilution makes detection of small effects particularly challenging. CLR normalization showed the least sensitivity to sample size, maintaining relatively high power even at smaller sample sizes.
+
+\subsection{Machine Learning Robustness}
+
+Logistic regression was the most robust classifier, maintaining $>$98.5\% accuracy across all conditions (Figure~5). Random forest performed similarly well ($>$98\% with CLR or PQN). Gradient boosting showed the most sensitivity (90.6--95.4\%), with $\sim$4 percentage points of accuracy loss under severe dilution. Notably, the relative performance ordering of normalization methods for classification differed from univariate analyses, underscoring the domain-specific nature of dilution effects.
+
+\subsection{Feature Selection Stability}
+
+Feature selection robustness declined with increasing dilution severity for all methods (Figure~6). Random forest importance was most stable (Jaccard 0.75--0.84), while LASSO was more variable (0.54--0.78). The effect of normalization on feature selection stability depended on the selection method, underscoring the importance of evaluating normalization in the context of the specific downstream analysis.
+
+\subsection{Power Analysis and Sample Size Recommendations}
+
+Empirical power curves (Figure~7) demonstrate that severe dilution effectively reduces the apparent effect size, shifting the power curve rightward and requiring larger sample sizes. CLR normalization largely restores the power curve to near-undiluted performance. Without normalization, achieving 80\% power under severe dilution requires approximately 50--100\% more subjects than under mild dilution.
+
+\subsection{Effect Size Attenuation}
+
+Moderate--severe dilution reduced mean absolute Cohen's $d$ from 0.75 to 0.57, a 23.2\% attenuation (Figure~8). After FDR correction, 10 of 15 biomarkers retained significance; after Bonferroni correction, 8 of 15 retained significance.
+
+\subsection{Distance Matrix Distortion}
+
+Distance matrix recovery depended strongly on both the distance metric and normalization method (Figure~9; Figure~E8). Seven distance metrics were evaluated: Euclidean, Bray--Curtis, Aitchison, cosine, Manhattan, Canberra, and Mahalanobis. Euclidean distance on unnormalized data was highly susceptible to dilution: Mantel correlations between true and observed distance matrices decreased from 0.95 (mild dilution) to below 0.60 (severe dilution), and PERMANOVA $R^2$ values were correspondingly attenuated as dilution-driven variance overwhelmed biological group separation. Manhattan distance showed a similar vulnerability pattern.
+
+Aitchison distance (Euclidean distance in CLR space) and cosine distance were the most robust metrics, both maintaining high Mantel correlations ($>$0.90) across all dilution severities. Aitchison's invariance has a clear algebraic basis: under proportional dilution, $x_{ij}^{\mathrm{obs}} = d_i \cdot x_{ij}^{\mathrm{true}}$, the CLR transformation cancels the subject-specific dilution factor $d_i$ because it appears as an additive constant in log space that is subtracted by the centering operation. Cosine distance is invariant for a simpler reason: it measures the angle between sample vectors, and scalar multiplication does not change angles. Cosine distance thus offers a computationally simpler dilution-invariant alternative to Aitchison distance that does not require a log transformation, making it applicable even when data contain zeros. Consequently, both Aitchison and cosine distances computed on diluted data are identical to those computed on true data, up to stochastic noise from LOD censoring and imputation.
+
+Bray--Curtis dissimilarity and Canberra distance exhibited intermediate robustness, with Mantel correlations of 0.80--0.90 under severe dilution when applied to unnormalized data. Their ratio-based formulations provide partial protection against proportional scaling, though they are not fully invariant. Notably, both Bray--Curtis and Canberra are undefined for data with negative values and were therefore not evaluated with CLR normalization. Mahalanobis distance showed variable performance depending on the condition number of the covariance matrix, with better robustness when the covariance structure was well-conditioned but degraded performance when dilution altered the covariance structure substantially. PERMANOVA $R^2$ values were highest with Aitchison and cosine distance, consistent with the superior clustering performance of CLR observed in our primary analyses and providing a mechanistic explanation for why CLR-normalized $K$-means clustering achieves near-perfect adjusted Rand indices.
+
+\subsection{High-Dimensional Extension}
+
+With $p = 500$ biomarkers under moderate dilution (Figure~E1), FDR correction partially compensated for CLR-inflated Type~I error: the proportion of null biomarkers called significant decreased from 78\% (uncorrected) to 12--18\% (FDR-corrected), but this came at the cost of reduced sensitivity (power decreased from 99\% to 82--88\% after FDR correction with CLR). Computation time scaled approximately linearly with $p$ for most analyses but quadratically for correlation-based evaluations.
+
+\subsection{CLR Type~I Error Decomposition}
+
+Under pure null datasets (zero true effect for all biomarkers), all normalization methods---including CLR---maintained nominal Type~I error rates (Figure~E2). This reveals a critical mechanistic insight: CLR's elevated Type~I error (78--80\% in the primary simulation) arises specifically when true differential biomarkers exist. The zero-sum constraint inherent in CLR ($\sum_j \mathrm{clr}(\mathbf{x}_i)_j = 0$) acts as a signal redistributor: when some biomarkers have true between-group differences, the constraint propagates these differences to null biomarkers, creating apparent effects where none exist biologically. Under pure null conditions, no signal exists to propagate, and Type~I error remains nominal. When true effects are present, permutation-based testing (1,000 permutations per biomarker) correctly accounts for the joint dependency structure induced by CLR, controlling Type~I error at near-nominal levels while preserving the power gains of CLR normalization.
+
+\subsection{Batch--Dilution Interaction}
+
+When both batch effects and dilution were present (Figure~E3), dilution-only correction (CLR) improved classification accuracy but did not address systematic batch-driven variance. Batch-only correction (ComBat~\cite{Johnson2007}) addressed batch effects but left dilution-related distortions intact. Combined correction (ComBat followed by CLR) yielded the best overall performance across all domains, suggesting that dilution correction and batch correction address orthogonal sources of variation.
+
+\subsection{LOD Sensitivity Analysis}
+
+The interaction between LOD severity and imputation method had modest effects on normalization performance at low censoring rates but became increasingly consequential at high censoring (Figures~E6--E7; Table~E5). At 5\% censoring, LOD/$\sqrt{2}$, LOD/2, and LOD substitution all yielded comparable results (power $\sim$0.90, accuracy $\sim$0.98); only zero substitution produced noticeably degraded performance (power 0.74, accuracy 0.92). This pattern persisted through 30\% censoring, where LOD/$\sqrt{2}$ substitution maintained power at 0.90 and accuracy at 0.98, while zero substitution (power 0.74, accuracy 0.87) and MICE (power 0.81, accuracy 0.67) showed greater degradation. At 50\% censoring, MICE imputation collapsed (power 0.29, accuracy 0.52), as insufficient observed data prevented reliable multivariate imputation. Simple substitution methods (LOD/$\sqrt{2}$, LOD/2, LOD) proved remarkably stable across all censoring levels, maintaining power $>$0.89 and accuracy $>$0.93 even at 50\% censoring. Zero substitution, while consistently the worst performer, degraded less steeply than MICE at extreme censoring. Importantly, the relative ranking of normalization methods was stable across imputation strategies: CLR consistently maximized power and clustering performance regardless of LOD handling, while its elevated Type~I error persisted across all imputation methods. These results indicate that normalization method choice has a larger effect on analytical conclusions than LOD imputation method, and that LOD/$\sqrt{2}$ substitution provides robust performance across censoring severities.
+
+\subsection{Distribution-Dependent Log-Transform Effect}
+
+Simulation-based comparison of normal versus log-normal data-generating distributions revealed that the benefit of log-transforming normalized data is distribution-dependent (Figure~E22). Under log-normal data---the distribution expected for BAL fluid biomarkers---log-transforming non-CLR methods substantially improved power, PERMANOVA $R^2$ (both Euclidean and cosine distance), and clustering ARI, closing much of the gap with CLR. Under normally distributed data, however, log-transformation degraded performance for all non-CLR methods: power decreased, Type~I error increased, and PERMANOVA $R^2$ dropped below raw-scale values. CLR, which always applies a log transform, similarly underperformed raw-scale methods under normal data. Cosine distance PERMANOVA $R^2$ was more robust to dilution than Euclidean $R^2$ across both distributions, consistent with its theoretical scale-invariance, but still showed distribution-dependent log-transform effects. These results demonstrate that CLR's advantage in our primary simulations (which use log-normal data) and in empirical BAL fluid analysis is partly attributable to variance stabilization via log-transformation rather than compositional normalization alone. The distribution-dependence of this effect implies that the optimal analysis strategy depends on the data-generating distribution: for right-skewed biomarker data (as in BAL fluid), log-transformation---whether via CLR or applied post-hoc to other methods---is beneficial, whereas for approximately normally distributed data, operating on the original scale is preferable. The empirical validation that follows tests this prediction directly by stratifying analytes by their observed distribution type.
+
+\subsection{Correlated Reference Biomarker}
+
+When the reference biomarker (total protein) was given a disease-associated group effect and correlated with analytes---mimicking the confounded biology of ARDS---reference normalization power degraded sharply with increasing $\delta_{\text{ref}}$ and $\rho_{\text{ref}}$ (Figure~10). At $\delta_{\text{ref}} = 0$ and $\rho_{\text{ref}} = 0$ (unconfounded reference), reference normalization performed comparably to total sum normalization. However, as $\delta_{\text{ref}}$ increased, dividing by a disease-elevated denominator progressively attenuated all group differences, reducing power from $\sim$0.85 to below 0.50 at the worst-case combination ($\delta_{\text{ref}} = 1.0$, $\rho_{\text{ref}} = 0.9$; Figure~10F). Two distinct mechanisms drove this degradation: (1)~a disease-elevated reference denominator attenuates the numerator's group effect across all analytes, and (2)~analytes highly correlated with the reference are overcorrected relative to independent analytes, differentially suppressing the signal. The heatmap of reference normalization power across all $\delta_{\text{ref}} \times \rho_{\text{ref}}$ combinations (Figure~10C) revealed a ``danger zone'' in the upper-right quadrant where power fell below 50\%, corresponding to the biologically realistic regime of ARDS BAL fluid.
+
+In contrast, CLR, PQN, total sum, median, and quantile normalization maintained robust power across all $\delta_{\text{ref}}$ and $\rho_{\text{ref}}$ values (Figure~10A--B), since these methods use information from all biomarkers rather than relying on a single reference. PERMANOVA $R^2$ showed a similar pattern: reference normalization $R^2$ declined with increasing $\delta_{\text{ref}}$, while other methods remained stable (Figure~10D). Type~I error for reference normalization also increased with $\delta_{\text{ref}}$, exceeding the nominal $\alpha = 0.05$ level at high reference group effects, whereas CLR showed its characteristic mild Type~I error inflation regardless of reference biomarker confounding (Figure~10E). The detailed supplementary analysis (Figure~E23) confirmed these patterns across all $\rho_{\text{ref}}$ values and all four evaluation metrics (power, Type~I error, PERMANOVA $R^2$, classification accuracy).
+
+\subsection{Empirical Validation: PICFLU Cohort}
+
+Reanalysis of BAL biomarker data from the PICFLU cohort~\cite{Boyd2020} confirmed key simulation predictions (Figure~E4). The dataset comprised 84 subjects (62 without and 22 with prolonged acute hypoxemic respiratory failure or death) with 49 cytokine/protein measurements in lower respiratory tract fluid. Total protein, a potential dilution indicator, exhibited a coefficient of variation of 115.5\%, reflecting substantial dilution variability. Applying different normalization methods to the same clinical dataset altered which biomarkers reached statistical significance: CLR normalization identified 17 significant analytes (12 after FDR correction), while unnormalized analysis identified 13 (0 after FDR). Concordance between normalization methods was moderate (average pairwise Jaccard similarity 0.49 for significant biomarker sets), consistent with the method-dependent sensitivity--specificity trade-offs observed in simulation. Of the 49 analytes, 15 (31\%) correlated significantly with total protein ($p < 0.05$), suggesting that dilution-associated variation is pervasive. Volcano plots revealed that normalization altered both the magnitude and direction of fold-change estimates for individual analytes, with CLR producing the most distinct pattern of significance (Figure~E9). PCA biplots under each normalization---with data log-transformed (for non-CLR methods) and scaled to unit variance prior to PCA---showed varying degrees of group separation, with CLR and PQN yielding the clearest visual distinction between clinical outcome groups (Figure~E10). A preprocessing comparison (Figure~E10b) confirmed that log-transformation substantially improved PCA structure for unnormalized data, while centering and scaling to unit variance ensured high-concentration analytes did not dominate principal components. Analyte rankings by effect size magnitude showed moderate concordance across normalization methods (mean pairwise Spearman $\rho \approx 0.60$--$0.80$), but the top-ranked analytes shifted substantially depending on normalization choice (Figure~E11). These findings demonstrate that the normalization-dependent variability in biomarker discovery observed in simulation manifests in real clinical BAL data.
+
+Distance metric analysis further confirmed simulation predictions (Figure~E18). PERMANOVA $R^2$ varied substantially across normalization $\times$ distance metric combinations, now evaluated for all seven distance metrics (Euclidean, Bray--Curtis, Aitchison, cosine, Manhattan, Canberra, Mahalanobis). Consistent with simulation results (Figures~9, E8), Aitchison distance applied to unnormalized data yielded the highest group separation, while Euclidean distance on unnormalized data yielded the lowest. Cosine distance showed dilution-invariance comparable to Aitchison distance, consistent with its theoretical scale-invariance. CLR normalization with Euclidean distance (algebraically equivalent to Aitchison distance) also performed well. Manhattan distance behaved similarly to Euclidean (both fully susceptible to dilution scaling), while Mahalanobis distance showed intermediate robustness. These empirical results directly validate the simulation prediction that scale-invariant metrics (Aitchison, cosine) are the most robust to dilution for group discrimination in BAL specimens.
+
+To determine whether CLR's advantages reflect compositional normalization or simply the variance-stabilizing effect of log-transforming right-skewed biomarker concentrations, we compared each normalization method on both raw and log-transformed scales (Figure~E20). Log-transforming raw data without any normalization substantially increased the number of significant analytes and improved PERMANOVA $R^2$ compared to raw-scale analysis, confirming that part of CLR's apparent advantage arises from operating on the log scale. However, CLR consistently outperformed simple log-transformation in both univariate significance and group separation, indicating that the compositional centering component of CLR provides additional benefit beyond variance stabilization. Log-transforming other normalization methods (total sum, PQN, median, quantile) also generally improved PERMANOVA $R^2$, though not uniformly for significance counts, suggesting that the log-scale advantage is most pronounced for distance-based analyses. Per-analyte normality testing (Shapiro--Wilk and D'Agostino--Pearson) classified the majority of PICFLU analytes as non-normally distributed, and stratification confirmed that the benefit of log-transformation was concentrated among non-normal analytes (Figure~E20b), directly validating the simulation prediction from Figure~E22 that the log-transform benefit is distribution-dependent.
+
+\subsection{Empirical Validation: Juss et al. Cohort}
+
+Reanalysis of BALF biomarker data from Juss et al.~\cite{Juss2016} provided a second independent confirmation of simulation predictions (Figure~E12). The dataset comprised 28 subjects (18 ARDS, 10 controls) with 44 BALF analytes; after excluding heavily censored analytes ($>$80\% below LLoQ), approximately 25 analytes were retained for analysis. Total protein exhibited extreme variability (CV $\approx$ 138\%), consistent with substantial dilution heterogeneity.
+
+As predicted by simulation, normalization choice materially altered which analytes reached significance for ARDS vs.\ control comparisons. Concordance between normalization methods was moderate (Figure~E12C), mirroring the PICFLU findings. Volcano plots revealed method-specific patterns of significance, with CLR and PQN again producing the most distinct profiles (Figure~E13). PCA biplots---with log-transformation and unit-variance scaling applied prior to PCA---showed that CLR and PQN normalizations yielded clearer visual separation between ARDS and control groups, while unnormalized data showed dilution-dominated variance along the first principal component (Figure~E14). The preprocessing comparison (Figure~E14b) corroborated the PICFLU finding that log-transformation and scaling improve PCA structure for non-CLR methods. Analyte rankings by effect size magnitude showed moderate concordance across methods, but top-ranked analytes shifted substantially with normalization choice (Figure~E15).
+
+The authors' protein correction---dividing each analyte concentration by total protein---produced results that differed from both CLR and PQN normalization (Figure~E16). The set of significant analytes under protein correction overlapped only partially with CLR-identified analytes, highlighting that biological and computational normalization approaches are not interchangeable.
+
+The blood negative control confirmed that normalization-dependent discrepancies are specific to dilution-prone specimens (Figure~E17). In blood (where no BAL dilution occurs), normalization methods produced substantially more concordant results (higher mean pairwise Jaccard similarity) than in BALF from the same study. This asymmetry---high concordance in blood, lower concordance in BALF---directly supports the prediction that normalization-dependent variability arises from dilution artifacts rather than from intrinsic properties of the normalization algorithms.
+
+Distance metric analysis of the Juss cohort mirrored the PICFLU findings (Figure~E19). In BALF, PERMANOVA $R^2$ varied markedly across normalization $\times$ distance metric combinations across all seven metrics, with Aitchison and cosine distance on unnormalized data yielding the strongest group separation. In blood, $R^2$ values were generally higher and more uniform across distance metric choices, consistent with the absence of dilution artifacts. This BALF--blood contrast provides further empirical support for the simulation prediction that distance metric choice is most consequential in dilution-prone specimens.
+
+The log-transform comparison in the Juss cohort (Figure~E21) corroborated the PICFLU findings. Log-transforming raw BALF data improved group separation compared to raw-scale analysis, but CLR normalization again outperformed simple log-transformation for both significance detection and PERMANOVA $R^2$. Per-analyte normality testing and stratified analysis (Figure~E21b) confirmed that the log-transform benefit was concentrated among non-normally distributed analytes, consistent with both the PICFLU findings and the simulation predictions from Figure~E22. The consistency of this pattern across two independent cohorts with different analyte panels and patient populations strengthens the conclusion that CLR's compositional centering contributes meaningfully beyond variance stabilization, while also highlighting that a substantial portion of CLR's apparent advantage is attributable to the log transformation itself.
+
+% ============================================================
+% DISCUSSION
+% ============================================================
+\section{Discussion}
+
+\subsection{Summary and Clinical Implications}
+
+This study provides the first comprehensive, cross-domain quantitative assessment of how sample dilution affects biomarker discovery in lower respiratory tract fluids. Our key finding is that dilution effects are profoundly domain-specific: the same normalization method that maximizes sensitivity for clustering and classification (CLR) produces unacceptable Type~I error inflation in univariate testing. This has immediate clinical implications for BAL biomarker studies, where researchers must make normalization decisions early in the analytical pipeline without full knowledge of their downstream consequences.
+
+The magnitude of dilution's impact is clinically significant. A 23\% attenuation of effect sizes translates directly to missed biomarker discoveries; for a study powered at 80\% under ideal conditions, moderate--severe dilution without normalization would reduce power to approximately 60--65\%, potentially missing one-third of true positive associations. The additional sample size burden (50--100\% more subjects) to compensate for dilution-related power loss has substantial implications for study cost and feasibility, particularly in critically ill populations where BAL is most commonly performed.
+
+\subsection{Mechanistic Basis of CLR Type~I Error Inflation}
+
+Our decomposition analysis reveals that CLR's elevated Type~I error is a consequence of the zero-sum constraint inherent in log-ratio transformations, not a fundamental limitation of compositional approaches. When compositional data with $p$ features is CLR-transformed, the resulting variables satisfy $\sum_j \mathrm{clr}(\mathbf{x}_i)_j = 0$ for each sample $i$. This constraint introduces negative correlations between transformed variables~\cite{Aitchison1986,Gloor2017}, violating the independence assumptions of standard parametric tests. The practical consequence is that a change in any one biomarker mechanically shifts the CLR values of all other biomarkers, creating apparent differences where none exist.
+
+Our finding that permutation-based testing with CLR-transformed data restores nominal Type~I error while preserving power gains offers a practical resolution. Permutation tests make no distributional assumptions and naturally account for the dependency structure induced by CLR. This combination---CLR normalization with permutation-based inference---may represent the best available approach for BAL biomarker studies that prioritize both sensitivity and specificity control.
+
+\subsection{Distance Matrix Recovery and Implications for Ordination}
+
+Our distance matrix analysis provides the mechanistic link between CLR normalization and superior clustering performance. Because both Aitchison and cosine distance are algebraically invariant to proportional dilution, analyses that operate in these spaces---including $K$-means clustering, PCoA ordination, and PERMANOVA---are inherently protected from dilution artifacts. This explains the near-perfect adjusted Rand indices observed with CLR normalization even under severe dilution, and suggests that PERMANOVA with Aitchison or cosine distance should be the default for group comparison in distance-based analyses of dilution-prone specimens. Cosine distance offers a particularly appealing alternative to Aitchison distance: it does not require a log transformation, is defined for data containing zeros, and is computationally simpler, while achieving comparable dilution-invariance. Bray--Curtis and Canberra dissimilarity, while commonly used in ecological and microbiome studies, offer only partial protection and cannot be applied to CLR-transformed data due to their non-negativity requirement. Manhattan distance, like Euclidean, is fully susceptible to dilution scaling and should be avoided for dilution-prone specimens. Mahalanobis distance accounts for feature correlations but is sensitive to dilution-induced covariance changes. Empirical validation in both the PICFLU and Juss cohorts confirmed these predictions across all seven metrics: Aitchison and cosine distance on unnormalized BALF data consistently yielded the highest PERMANOVA $R^2$ for group separation, while blood specimens (not subject to dilution) showed more uniform $R^2$ across distance metrics (Figures~E18, E19).
+
+\subsection{Confounding of Log Transformation and Compositional Normalization}
+
+An important methodological consideration is that CLR is the only normalization method evaluated here that applies a log transformation; all other methods operate on the original concentration scale. Biomarker concentrations in BAL fluid are typically right-skewed and span several orders of magnitude, so a log transformation alone provides variance stabilization, improved normality for parametric tests, and more equitable feature weighting in multivariate analyses---benefits that are independent of any dilution correction. Our log-transform comparison (Figures~E20, E21) demonstrates that a substantial portion of CLR's empirical advantage can be attributed to this scale effect: simple log-transformation of raw data, without any normalization, improved both significance detection and PERMANOVA $R^2$ compared to raw-scale analysis. However, CLR consistently outperformed simple log-transformation in both cohorts, confirming that the compositional centering component---subtracting the log of the geometric mean---provides additional dilution correction beyond what variance stabilization alone achieves. Per-analyte normality testing and stratified analysis (Figures~E20b, E21b) provided direct empirical confirmation: the benefit of log-transformation was concentrated among non-normally distributed (right-skewed) analytes, while normally distributed analytes showed no improvement or slight degradation, precisely as predicted by our simulation (Figure~E22). These findings suggest that future benchmarking studies comparing normalization methods should ensure all methods operate on the same scale (e.g., by log-transforming all methods before comparison) to avoid conflating the effects of scale transformation with those of normalization. Our simulation-based distribution $\times$ scale analysis (Figure~E22) provides direct confirmation: under log-normal data, log-transforming non-CLR methods closed much of the performance gap with CLR, whereas under normally distributed data, the same log transformation was detrimental and CLR underperformed raw-scale methods. Cosine distance, which is scale-invariant like Aitchison but does not require a log transformation, showed more robust PERMANOVA $R^2$ across dilution severities, further supporting the recommendation of scale-invariant metrics for dilution-prone specimens. This distribution-dependence implies that CLR's superiority in our primary simulations and empirical analyses is partly an artifact of the data-generating distribution rather than a universal property of compositional normalization. Future benchmarks should test methods under multiple distributional assumptions and compare all methods on a common scale to isolate normalization-specific effects from scale-transformation effects.
+
+\subsection{Reference Biomarker Normalization: When the Denominator Is Confounded}
+
+Our correlated reference biomarker analysis (Figure~10) provides the first systematic quantification of a widely suspected but rarely formalized problem: dividing analyte concentrations by a reference biomarker that is itself confounded with the disease of interest. In ARDS, total protein in BAL fluid is elevated due to alveolar-capillary permeability changes---the same pathological process that elevates many inflammatory analytes~\cite{Matthay2019}. Our simulation demonstrates that even moderate reference confounding ($\delta_{\text{ref}} = 0.5$, $\rho_{\text{ref}} = 0.5$) reduces reference normalization power by approximately 20\%, while severe confounding ($\delta_{\text{ref}} = 1.0$, $\rho_{\text{ref}} = 0.9$) renders reference normalization less effective than no normalization at all. The two mechanisms identified---global attenuation from a disease-elevated denominator and differential overcorrection of correlated analytes---explain why protein-corrected BAL biomarker results often disagree with computationally normalized results, as observed empirically by Juss et al.~\cite{Juss2016} (Figure~E16). These findings argue strongly against using total protein normalization as the sole dilution correction method in ARDS BAL studies, and suggest that computational methods (CLR, PQN, total sum) that leverage information from all analytes simultaneously should be preferred.
+
+\subsection{Comparison with Existing Literature}
+
+Our results are consistent with Haeger et al.'s recent demonstration that traditional BAL dilution markers are unreliable~\cite{Haeger2024}. If biological dilution correction cannot be trusted, computational normalization becomes the primary available strategy---making the performance characteristics documented here directly relevant to clinical practice. The finding that SP-D may serve as a more reliable dilution marker~\cite{Haeger2024,Chakrabarti2022} does not obviate the need for computational approaches, since SP-D measurement requires a separate assay and may not be available in all datasets.
+
+The normalization benchmarking literature in metabolomics~\cite{Lu2025,Wang2018,Li2017,Valikangas2018,Chawade2014,VanDenBerg2006} and RNA-seq~\cite{Risso2014} has generally evaluated methods within single analytical domains (typically differential abundance or classification). Our cross-domain evaluation reveals trade-offs that single-domain studies miss---particularly the divergent performance of CLR between univariate testing and multivariate analyses. The parallels to urine biomarker normalization challenges~\cite{Waikar2010} suggest that our findings may generalize to other dilution-prone biofluids.
+
+\subsection{Practical Recommendations}
+
+Based on our findings, we offer domain-specific recommendations for BAL biomarker studies (Table~3):
+
+\textbf{For hypothesis testing (differential expression):} If controlling Type~I error is paramount (e.g., initial discovery requiring validation), use unnormalized data or quantile normalization with FDR correction. If maximizing sensitivity is the priority (e.g., screening studies), use CLR normalization with permutation-based testing rather than parametric tests.
+
+\textbf{For classification and prediction:} Apply CLR or PQN normalization. These consistently improve classification performance, and the Type~I error concerns that arise in univariate testing are not directly relevant. Logistic regression should be considered as a baseline classifier given its robustness to dilution.
+
+\textbf{For biomarker panel selection:} Use random forest feature importance, which showed the best stability. Report selected features under multiple normalization strategies and prioritize features consistently selected across approaches.
+
+\textbf{For handling below-LOD values:} The LOD/$\sqrt{2}$ substitution~\cite{Hornung1990} provides robust performance across all censoring levels tested (5--50\%) and is recommended as the default. LOD/2 and LOD substitution perform comparably. Zero substitution should be avoided as it consistently degrades performance, particularly for correlation recovery and clustering. MICE imputation is not recommended for BAL biomarker data with $>$20\% censoring, as it degrades substantially when insufficient observed data are available for multivariate imputation.
+
+\textbf{For study design:} Increase sample sizes by 50--100\% beyond standard power calculations to account for dilution-related power loss. When possible, collect and report dilution surrogates (e.g., SP-D~\cite{Haeger2024}, total protein) to enable sensitivity analyses. Report results under at least two normalization approaches.
+
+\subsection{Limitations}
+
+Several limitations should be considered. First, our simulation assumes proportional dilution affecting all biomarkers identically. In practice, differential protein binding, enzymatic degradation, or analyte-specific matrix effects may introduce non-proportional artifacts. Second, most analyses focused on two-group comparisons; extension to multi-group designs and longitudinal studies would broaden applicability. Third, we used block correlation structures; real datasets may exhibit more complex dependency patterns. Fourth, the PICFLU validation, while supportive, was limited to the analytes and sample sizes available in the published dataset. Prospective validation with paired dilution experiments (known dilution factors applied to split samples) would provide stronger evidence. Fifth, while our LOD sensitivity analysis examined five imputation methods across a range of censoring severities, we did not evaluate more complex approaches such as Tobit models or maximum likelihood estimation for left-censored data, which may outperform MICE in specific settings. Sixth, while our correlated reference biomarker analysis (Analysis~16) relaxes the assumption that all biomarkers share a uniform group effect by allowing the reference biomarker to have an independent disease-associated elevation and specified correlations with analytes, it still models a single scalar correlation between the reference and all analytes rather than analyte-specific correlations that may vary in sign and magnitude. Finally, our framework does not model pre-analytical variables (sample handling, freeze-thaw cycles, storage duration) that can introduce additional variation beyond dilution.
+
+\subsection{Future Directions}
+
+Several extensions would be valuable: prospective validation using paired dilution experiments; extension to cerebrospinal fluid, urine, and other dilution-prone biofluids; development of composite normalization strategies that leverage domain-specific strengths; integration with deep learning approaches for end-to-end dilution-robust biomarker discovery; and Bayesian hierarchical models that jointly estimate dilution factors and biomarker effects.
+
+% ============================================================
+% CONCLUSIONS
+% ============================================================
+\section{Conclusions}
+
+Sample dilution is a pervasive challenge in BAL biomarker research that differentially distorts different analytical approaches. Through comprehensive simulation and empirical validation, we demonstrate that no single normalization method is universally optimal: CLR and PQN maximize sensitivity for classification and clustering, while unnormalized or quantile-normalized data preserves specificity. Aitchison distance (Euclidean distance in CLR space) and cosine distance are both algebraically invariant to proportional dilution and should be preferred for distance-based analyses including ordination and PERMANOVA; cosine distance offers a simpler alternative that does not require a log transformation. CLR's Type~I error inflation can be mitigated by using permutation-based inference. LOD/$\sqrt{2}$ substitution provides robust performance across censoring severities, while zero substitution and MICE imputation at high censoring rates should be avoided. Reporting results under multiple normalization approaches is essential for robust biomarker discovery. Our simulation framework provides a tool for researchers to evaluate normalization strategies under conditions specific to their study design and specimen type.
+
+% ============================================================
+% ACKNOWLEDGMENTS
+% ============================================================
+\section*{Acknowledgments}
+
+The author acknowledges the PICFLU study investigators, particularly Adrienne G. Randolph and Paul G. Thomas, for making their data publicly available, enabling independent reanalysis. The author also acknowledges Juss et al.\ for publishing their supplementary BALF and blood biomarker data, which enabled the second independent validation presented in this study.
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\newpage
+
+% ============================================================
+% TABLES
+% ============================================================
+\section*{Tables}
+
+\begin{table}[ht!]
+\centering
+\caption{Dilution Factor Distribution Summary Statistics}
+\label{tab:dilution_stats}
+\begin{tabular}{lcccccc}
+\toprule
+Model & Mean & SD & Median & Min & Max & Skewness \\
+\midrule
+Beta(8,2) (Mild) & 0.797 & 0.113 & 0.812 & 0.461 & 0.995 & $-$0.662 \\
+Beta(5,5) (Moderate) & 0.490 & 0.149 & 0.481 & 0.067 & 0.869 & 0.141 \\
+Beta(2,8) (Severe) & 0.203 & 0.121 & 0.185 & 0.003 & 0.614 & 0.745 \\
+Bimodal & 0.559 & 0.310 & 0.672 & 0.004 & 0.996 & $-$0.325 \\
+Mixture & 0.496 & 0.239 & 0.490 & 0.031 & 0.978 & 0.016 \\
+Uniform & 0.494 & 0.172 & 0.489 & 0.201 & 0.799 & 0.047 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht!]
+\centering
+\caption{Normalization Method Performance Summary (Mean Across 20 Replications)}
+\label{tab:norm_performance}
+\small
+\begin{tabular}{llcccccc}
+\toprule
+Severity & Method & Power & Type~I Err. & Corr.\ Rank & PCA RV & Clust.\ ARI & Class.\ Acc. \\
+\midrule
+\multirow{6}{*}{Mild}
+ & none & 0.975 & 0.012 & 0.987 & 0.941 & 0.049 & 0.986 \\
+ & CLR & 0.994 & 0.783 & 0.804 & 0.366 & 0.980 & 0.994 \\
+ & PQN & 0.994 & 0.663 & 0.799 & 0.353 & 0.948 & 0.991 \\
+ & total\_sum & 0.921 & 0.584 & 0.590 & 0.293 & 0.673 & 0.986 \\
+ & quantile & 0.975 & 0.000 & 0.944 & 0.925 & 0.046 & 0.990 \\
+ & median & 0.897 & 0.643 & 0.641 & 0.304 & 0.730 & 0.987 \\
+\midrule
+\multirow{6}{*}{Moderate}
+ & none & 0.958 & 0.000 & 0.951 & 0.800 & 0.034 & 0.976 \\
+ & CLR & 0.984 & 0.783 & 0.809 & 0.367 & 0.974 & 0.994 \\
+ & PQN & 0.994 & 0.638 & 0.800 & 0.352 & 0.944 & 0.989 \\
+ & total\_sum & 0.911 & 0.584 & 0.593 & 0.290 & 0.659 & 0.984 \\
+ & quantile & 0.958 & 0.000 & 0.907 & 0.787 & 0.030 & 0.983 \\
+ & median & 0.897 & 0.633 & 0.644 & 0.308 & 0.718 & 0.984 \\
+\midrule
+\multirow{6}{*}{Severe}
+ & none & 0.871 & 0.042 & 0.867 & 0.470 & 0.009 & 0.960 \\
+ & CLR & 0.994 & 0.798 & 0.808 & 0.363 & 0.951 & 0.987 \\
+ & PQN & 0.994 & 0.627 & 0.800 & 0.351 & 0.927 & 0.986 \\
+ & total\_sum & 0.903 & 0.584 & 0.593 & 0.287 & 0.644 & 0.980 \\
+ & quantile & 0.859 & 0.012 & 0.841 & 0.464 & 0.009 & 0.965 \\
+ & median & 0.897 & 0.633 & 0.646 & 0.301 & 0.670 & 0.980 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht!]
+\centering
+\caption{Domain-Specific Normalization and LOD Recommendations for BAL Biomarker Studies}
+\label{tab:recommendations}
+\begin{tabular}{p{3cm}p{3cm}p{3cm}p{4cm}}
+\toprule
+Analytical Goal & Recommended Method & Alternative & Key Consideration \\
+\midrule
+Hypothesis testing (specificity priority) & None or Quantile & --- & Preserves Type~I error control \\
+Hypothesis testing (sensitivity priority) & CLR + permutation test & PQN & Use permutation test to control Type~I error \\
+Classification & CLR or PQN & Logistic regression baseline & Type~I error not relevant \\
+Clustering & CLR & PQN & Essential for removing dilution-driven variance \\
+Feature selection & RF importance & LASSO with CLR & Report under multiple normalizations \\
+Correlation recovery & None & Quantile & Normalization distorts correlation structure \\
+Distance-based analyses (ordination, PERMANOVA) & Aitchison distance (CLR + Euclidean) & Cosine distance & Aitchison and cosine are invariant to proportional dilution \\
+Below-LOD handling & LOD/$\sqrt{2}$ & LOD/2 or LOD & Robust across censoring levels; avoid zero substitution \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\newpage
+
+% ============================================================
+% FIGURES
+% ============================================================
+\section*{Figures}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig1_dilution_distributions}
+\caption{Dilution factor distributions for six dilution models. Beta distributions with varying shape parameters span the range from mild (Beta(8,2), mean = 0.80) to severe (Beta(2,8), mean = 0.20) dilution. Dashed vertical lines indicate distribution means.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig2_dilution_impact}
+\caption{Impact of dilution on biomarker data under severe dilution (Beta(2,8)). (A)~True vs.\ observed concentrations colored by dilution factor. (B)~PCA of true data showing group separation. (C)~PCA of diluted data showing reduced group separation. (D)~True inter-biomarker correlation matrix. (E)~Observed correlation matrix showing dilution-inflated correlations. (F)~Distribution shift of biomarker concentrations.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig3_normalization_comparison}
+\caption{Normalization method performance across three dilution severities for six analytical metrics. Box plots represent distributions across 20 Monte Carlo replications. Dashed line in Type~I Error panel indicates the nominal $\alpha = 0.05$ level.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig4_sample_effect_power}
+\caption{Statistical power as a function of sample size and effect size under moderate--severe dilution (Beta(3,5)), for four normalization methods. Cells show mean power across 10 replications.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig5_ml_robustness}
+\caption{Classification accuracy of three machine learning methods under four dilution conditions and three normalization approaches. Error bars represent 95\% confidence intervals.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig6_feature_selection}
+\caption{Feature selection robustness measured by Jaccard similarity between features selected from diluted and undiluted data. Three feature selection methods are compared across three dilution severities and three normalization approaches.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.48\textwidth]{fig7a_power_curves_theoretical}
+\hfill
+\includegraphics[width=0.48\textwidth]{fig7b_empirical_power}
+\caption{Empirical power curves under three dilution severities and four normalization methods, demonstrating the sample size penalty imposed by severe dilution.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig8c_effect_size_comparison}
+\caption{Effect size attenuation under moderate--severe dilution. Bar plots show mean absolute Cohen's $d$ for each biomarker before and after dilution, with significance annotations after multiple testing correction.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig9_distance_summary}
+\caption{Distance matrix recovery under dilution across seven distance metrics (Euclidean, Bray--Curtis, Aitchison, cosine, Manhattan, Canberra, Mahalanobis). (A)~Mantel correlation between true and observed pairwise distance matrices by distance metric across dilution severities (key normalizations: none, CLR, PQN). (B)~PERMANOVA pseudo-$R^2$ heatmap by normalization method and distance metric, averaged across severities. (C)~Scatter plot of true vs.\ observed pairwise distances for one example dataset under moderate dilution without normalization, colored by distance metric.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig10_correlated_reference}
+\caption{Correlated reference biomarker simulation under moderate dilution (Beta(5,5), 20 replications). (A)~Power vs.\ reference group effect $\delta_{\text{ref}}$ at $\rho_{\text{ref}} = 0.7$, lines by normalization method. (B)~Power vs.\ reference-analyte correlation $\rho_{\text{ref}}$ at $\delta_{\text{ref}} = 0.5$. (C)~Heatmap of reference normalization power across all $\delta_{\text{ref}} \times \rho_{\text{ref}}$ combinations, showing a ``danger zone'' in the upper-right where power falls below 50\%. (D)~PERMANOVA $R^2$ vs.\ $\delta_{\text{ref}}$ at $\rho_{\text{ref}} = 0.7$. (E)~Type~I error vs.\ $\delta_{\text{ref}}$ at $\rho_{\text{ref}} = 0.7$; dashed line at $\alpha = 0.05$. (F)~Bar chart of all normalization methods at worst-case confounding ($\delta_{\text{ref}} = 1.0$, $\rho_{\text{ref}} = 0.9$).}
+\end{figure}
+
+\clearpage
+\section*{Online Supplement Figures}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE1_high_dimensional}
+\caption*{\textbf{Figure~E1.} High-dimensional simulation results under default parameters across three dilution severities.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE2_type1_decomposition}
+\caption*{\textbf{Figure~E2.} Type~I error decomposition across normalization methods and dilution severities.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE3_batch_dilution}
+\caption*{\textbf{Figure~E3.} Batch-correlated dilution simulation results.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE4_picflu_reanalysis}
+\caption*{\textbf{Figure~E4.} PICFLU cohort reanalysis overview. (A)~Number of significant analytes by normalization method. (B)~Significance concordance heatmap. (C)~Jaccard similarity matrix.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE5_multigroup}
+\caption*{\textbf{Figure~E5.} Multi-group simulation results.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE6_lod_sensitivity}
+\caption*{\textbf{Figure~E6.} Limit-of-detection sensitivity analysis.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE7_lod_norm_interaction}
+\caption*{\textbf{Figure~E7.} LOD $\times$ normalization interaction analysis.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE8_distance_metrics}
+\caption*{\textbf{Figure~E8.} Detailed distance metric recovery results. Row~1: Mantel correlation boxplots across 20 replications for each of seven distance metrics (Euclidean, Bray--Curtis, Aitchison, cosine, Manhattan, Canberra, Mahalanobis), with normalization methods on the $x$-axis and dilution severity as hue. Row~2: corresponding PERMANOVA $R^2$ boxplots.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE9_picflu_volcanos}
+\caption*{\textbf{Figure~E9.} Volcano plots of PICFLU BAL reanalysis under six normalization methods. Each panel shows $\log_2(\text{fold change})$ vs.\ $-\log_{10}(p\text{-value})$ for all analytes, with significant analytes ($p < 0.05$) highlighted in orange and the top 5 analytes labeled.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE10_picflu_pca}
+\caption*{\textbf{Figure~E10.} PCA biplots of PICFLU BAL data under six normalization methods, with log-transformation applied to non-CLR methods and all data centered and scaled to unit variance (StandardScaler) prior to PCA. Points are colored by clinical outcome (control vs.\ PrAHRF/Death). Axes show percentage of variance explained by each principal component.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE10b_picflu_pca_preprocessing}
+\caption*{\textbf{Figure~E10b.} PCA preprocessing comparison for the PICFLU cohort. Two normalization methods (no normalization, top row; CLR, bottom row) are shown under four preprocessing conditions: raw, log-transformed, centered + scaled, and log + centered + scaled. Demonstrates the effect of log-transformation and feature scaling on PCA structure.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE11_picflu_ranks}
+\caption*{\textbf{Figure~E11.} Analyte ranking comparison across normalization methods in the PICFLU cohort. (A)~Spearman correlation heatmap of analyte rankings. (B)~Heatmap showing the rank of the top 10 analytes from raw analysis across all normalization methods.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE12_juss_reanalysis}
+\caption*{\textbf{Figure~E12.} Juss et al.\ BALF data reanalysis overview (ARDS vs.\ control, 7 normalization methods). (A)~Number of significant analytes. (B)~Significance concordance heatmap. (C)~Pairwise Jaccard similarity matrix.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE13_juss_volcanos}
+\caption*{\textbf{Figure~E13.} Volcano plots of Juss et al.\ BALF reanalysis under seven normalization methods. Panel~8: scatter plot comparing $-\log_{10}(p)$ values between CLR and protein-corrected normalization.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE14_juss_pca}
+\caption*{\textbf{Figure~E14.} PCA biplots of Juss et al.\ BALF data under seven normalization methods, with log-transformation applied to non-CLR methods and all data centered and scaled to unit variance prior to PCA. Points colored by group (ARDS = orange, control = blue). Panel~8 shows CLR-transformed data (scaled) colored by total protein concentration.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE14b_juss_pca_preprocessing}
+\caption*{\textbf{Figure~E14b.} PCA preprocessing comparison for the Juss et al.\ cohort. Two normalization methods (no normalization, top row; CLR, bottom row) under four preprocessing conditions: raw, log-transformed, centered + scaled, and log + centered + scaled.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE15_juss_ranks}
+\caption*{\textbf{Figure~E15.} Analyte ranking comparison across normalization methods in the Juss et al.\ cohort. (A)~Spearman correlation heatmap. (B)~Top-10 analyte ranks across methods.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE16_juss_protein_comparison}
+\caption*{\textbf{Figure~E16.} Comparison of protein correction vs.\ computational normalization (Juss et al.). (A)~$-\log_{10}(p)$ protein correction vs.\ CLR. (B)~$-\log_{10}(p)$ protein correction vs.\ PQN. (C)~Bar chart of uniquely vs.\ shared significant analytes.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE17_juss_blood_control}
+\caption*{\textbf{Figure~E17.} Blood negative control analysis (Juss et al.). (A)~Significant analytes in blood by normalization method. (B)~Side-by-side Jaccard similarity heatmaps comparing BALF and blood.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE18_picflu_distance}
+\caption*{\textbf{Figure~E18.} Distance metric analysis of the PICFLU cohort. (A)~PERMANOVA $R^2$ heatmap (6 normalizations $\times$ 7 distance metrics). Gray cells = invalid combinations. (B)~Grouped bar chart for key normalizations by distance metric.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE19_juss_distance}
+\caption*{\textbf{Figure~E19.} Distance metric analysis of the Juss et al.\ cohort (BALF and blood). (A)~BALF PERMANOVA $R^2$ heatmap. (B)~Blood PERMANOVA $R^2$ heatmap. (C)~Grouped bar chart comparing BALF vs.\ blood $R^2$.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE20_picflu_log_comparison}
+\caption*{\textbf{Figure~E20.} Log-transform comparison for the PICFLU cohort. (A)~Number of significant analytes on raw (orange) vs.\ log (blue) scales, CLR dashed reference. (B)~PERMANOVA $R^2$ (Euclidean) on raw vs.\ log scales. (C)~Scatter of $-\log_{10}(p)$ simple log vs.\ CLR.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE20b_picflu_log_stratified}
+\caption*{\textbf{Figure~E20b.} Normality-stratified log-transform comparison for the PICFLU cohort. Analytes classified as normal or non-normal by Shapiro--Wilk and D'Agostino--Pearson tests. Top: non-normal analytes; bottom: normal analytes. Validates simulation prediction (Figure~E22) that log-transform benefits are distribution-dependent.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE21_juss_log_comparison}
+\caption*{\textbf{Figure~E21.} Log-transform comparison for the Juss et al.\ BALF cohort. Layout as in Figure~E20. Log-transformation explains a substantial portion of CLR's advantage, but CLR's compositional centering provides additional benefit.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE21b_juss_log_stratified}
+\caption*{\textbf{Figure~E21b.} Normality-stratified log-transform comparison for the Juss et al.\ BALF cohort. Confirms the PICFLU finding that log-transform benefits are distribution-dependent.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE22_distribution_log_comparison}
+\caption*{\textbf{Figure~E22.} Simulation-based distribution $\times$ log-transform sensitivity analysis under moderate dilution (20 replications). Rows: normally distributed (top) and log-normally distributed (bottom) data. Columns: power, Type~I error, PERMANOVA $R^2$ (Euclidean), PERMANOVA $R^2$ (cosine). Orange = raw scale, blue = log-transformed. Dashed green = CLR. Under log-normal data, log-transforming non-CLR methods closes much of the gap with CLR; under normal data, log-transformation degrades performance.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figE23_correlated_reference_detail}
+\caption*{\textbf{Figure~E23.} Detailed correlated reference biomarker results (moderate dilution, 20 replications). Rows: reference-analyte correlation $\rho_{\text{ref}} = 0.0, 0.3, 0.5, 0.7, 0.9$. Columns: power, Type~I error, PERMANOVA $R^2$ (Euclidean), classification accuracy. Each panel shows metric vs.\ reference group effect $\delta_{\text{ref}}$ with lines colored by normalization method. Reference normalization degrades progressively with increasing $\delta_{\text{ref}}$ and $\rho_{\text{ref}}$, while computational methods (CLR, PQN, total sum) remain robust.}
+\end{figure}
+
+\end{document}

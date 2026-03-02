@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
+from scipy.spatial.distance import pdist, squareform
 from sklearn import metrics, decomposition, cluster, preprocessing
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -524,28 +525,50 @@ def apply_detection_limits(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Apply detection limits to biomarker concentrations.
+
+    Parameters:
+    -----------
+    handling_method : str
+        'substitute' : LOD/√2 (Hornung & Reed 1990)
+        'zero'       : replace with 0
+        'lod_half'   : replace with LOD/2
+        'lod'        : replace with LOD value itself
+        'mice'       : set below-LOD to NaN, then impute via MICE (IterativeImputer)
+        'min'        : replace with minimum observed value
     """
     n_subjects, n_biomarkers = concentrations.shape
-    
+
     # Initialize censoring mask
     censored = np.zeros_like(concentrations, dtype=bool)
-    
+
     # Create output array
     output = concentrations.copy()
-    
+
     # Apply LOD for each biomarker
     for j in range(n_biomarkers):
         below_lod = concentrations[:, j] < lods[j]
         censored[:, j] = below_lod
-        
+
         if handling_method == 'substitute':
             # Replace with LOD/√2
             output[below_lod, j] = lods[j] / np.sqrt(2)
-        
+
         elif handling_method == 'zero':
             # Replace with zero
             output[below_lod, j] = 0
-            
+
+        elif handling_method == 'lod_half':
+            # Replace with LOD/2
+            output[below_lod, j] = lods[j] / 2
+
+        elif handling_method == 'lod':
+            # Replace with the LOD value itself
+            output[below_lod, j] = lods[j]
+
+        elif handling_method == 'mice':
+            # Set below-LOD to NaN; MICE imputation applied after the loop
+            output[below_lod, j] = np.nan
+
         elif handling_method == 'min':
             # Replace with minimum observed value
             if not all(below_lod):
@@ -553,7 +576,17 @@ def apply_detection_limits(
                 output[below_lod, j] = min_observed
             else:
                 output[below_lod, j] = lods[j] / 2
-    
+
+    # MICE imputation: apply after all columns are marked
+    if handling_method == 'mice':
+        from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+        from sklearn.impute import IterativeImputer
+        imputer = IterativeImputer(
+            max_iter=10, random_state=0, min_value=0,
+            sample_posterior=False
+        )
+        output = imputer.fit_transform(output)
+
     return output, censored
 
 
@@ -603,7 +636,9 @@ def generate_dataset(
     lod_handling: str = 'substitute',
     block_size: Optional[int] = None,
     group_sizes: Optional[List[int]] = None,
-    biomarker_scales: Optional[np.ndarray] = None
+    biomarker_scales: Optional[np.ndarray] = None,
+    ref_group_effect: Optional[float] = None,
+    ref_analyte_corr: Optional[Union[float, np.ndarray]] = None,
 ) -> Dict:
     """
     Generate a complete dataset with true and observed biomarker concentrations.
@@ -629,7 +664,11 @@ def generate_dataset(
         'distribution': distribution,
         'dilution_alpha': dilution_alpha,
         'dilution_beta': dilution_beta,
-        'lod_percentile': lod_percentile
+        'lod_percentile': lod_percentile,
+        'ref_group_effect': ref_group_effect,
+        'ref_analyte_corr': ref_analyte_corr if ref_analyte_corr is None
+            else (float(ref_analyte_corr) if np.isscalar(ref_analyte_corr)
+                  else ref_analyte_corr.tolist()),
     }
     
     # Generate correlation and covariance matrices
@@ -638,7 +677,21 @@ def generate_dataset(
         correlation_type=correlation_type,
         block_size=block_size
     )
-    
+
+    # Override reference-analyte correlations if specified
+    if ref_analyte_corr is not None:
+        rac = np.atleast_1d(ref_analyte_corr)
+        if rac.size == 1:
+            rac = np.full(n_biomarkers - 1, float(rac))
+        corr_matrix[0, 1:] = rac
+        corr_matrix[1:, 0] = rac
+        # Ensure positive definiteness via eigenvalue clipping
+        eigvals, eigvecs = np.linalg.eigh(corr_matrix)
+        eigvals = np.maximum(eigvals, 1e-6)
+        corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
+        d = np.sqrt(np.diag(corr_matrix))
+        corr_matrix = corr_matrix / np.outer(d, d)
+
     # Define variances based on distribution
     if distribution == 'lognormal':
         # Higher variance for lognormal to get similar spread in original scale
@@ -655,7 +708,12 @@ def generate_dataset(
         effect_sizes=effect_size,
         biomarker_scales=biomarker_scales
     )
-    
+
+    # Override reference biomarker (column 0) group effect if specified
+    if ref_group_effect is not None:
+        for g in range(1, n_groups):
+            group_means[g, 0] = group_means[0, 0] * (1 + ref_group_effect)
+
     # Generate true biomarker data
     X_true, y = generate_true_biomarker_data(
         n_subjects=n_subjects,
@@ -1329,6 +1387,193 @@ def analyze_clustering(
         labels = dbscan.fit_predict(X_scaled)
     
     return labels
+
+
+def compute_distance_matrix(X: np.ndarray, metric: str = 'euclidean') -> np.ndarray:
+    """
+    Compute pairwise distance matrix using the specified metric.
+
+    Parameters:
+    -----------
+    X : np.ndarray
+        Data matrix (n_samples x n_features)
+    metric : str
+        Distance metric: 'euclidean', 'bray_curtis', 'aitchison', 'cosine',
+        'manhattan', 'canberra', or 'mahalanobis'
+
+    Returns:
+    --------
+    np.ndarray
+        Symmetric pairwise distance matrix (n_samples x n_samples)
+    """
+    if metric == 'euclidean':
+        return squareform(pdist(X, 'euclidean'))
+    elif metric == 'bray_curtis':
+        # Bray-Curtis requires non-negative data
+        X_nn = np.maximum(X, 0)
+        return squareform(pdist(X_nn, 'braycurtis'))
+    elif metric == 'aitchison':
+        # Aitchison distance = Euclidean distance in CLR space
+        X_clr = centered_log_ratio(X)
+        return squareform(pdist(X_clr, 'euclidean'))
+    elif metric == 'cosine':
+        X_safe = X.copy()
+        row_norms = np.linalg.norm(X_safe, axis=1)
+        X_safe[row_norms == 0] += 1e-10
+        return squareform(pdist(X_safe, 'cosine'))
+    elif metric == 'manhattan':
+        return squareform(pdist(X, 'cityblock'))
+    elif metric == 'canberra':
+        X_nn = np.maximum(X, 0)
+        return squareform(pdist(X_nn, 'canberra'))
+    elif metric == 'mahalanobis':
+        try:
+            cov = np.cov(X.T)
+            if np.linalg.cond(cov) > 1e10 or X.shape[1] >= X.shape[0]:
+                cov += np.eye(cov.shape[0]) * 1e-6
+            VI = np.linalg.inv(cov)
+            return squareform(pdist(X, 'mahalanobis', VI=VI))
+        except (np.linalg.LinAlgError, ValueError):
+            variances = np.var(X, axis=0)
+            variances[variances == 0] = 1e-10
+            VI = np.diag(1.0 / variances)
+            return squareform(pdist(X, 'mahalanobis', VI=VI))
+    else:
+        raise ValueError(f"Unknown distance metric: {metric}")
+
+
+def evaluate_distance_matrix(
+    D_true: np.ndarray,
+    D_obs: np.ndarray,
+    n_permutations: int = 999
+) -> Dict:
+    """
+    Compare two pairwise distance matrices.
+
+    Parameters:
+    -----------
+    D_true : np.ndarray
+        True distance matrix
+    D_obs : np.ndarray
+        Observed distance matrix
+    n_permutations : int
+        Number of permutations for Mantel test
+
+    Returns:
+    --------
+    Dict with mantel_r, mantel_p, rank_correlation, mean_relative_error
+    """
+    n = D_true.shape[0]
+    # Extract upper triangle (excluding diagonal)
+    triu_idx = np.triu_indices(n, k=1)
+    d_true_vec = D_true[triu_idx]
+    d_obs_vec = D_obs[triu_idx]
+
+    # Mantel correlation (Pearson r between vectorized upper triangles)
+    mantel_r, _ = stats.pearsonr(d_true_vec, d_obs_vec)
+
+    # Permutation test for Mantel
+    count_ge = 0
+    for _ in range(n_permutations):
+        perm = np.random.permutation(n)
+        D_perm = D_obs[np.ix_(perm, perm)]
+        d_perm_vec = D_perm[triu_idx]
+        r_perm, _ = stats.pearsonr(d_true_vec, d_perm_vec)
+        if r_perm >= mantel_r:
+            count_ge += 1
+    mantel_p = (count_ge + 1) / (n_permutations + 1)
+
+    # Spearman rank correlation
+    rank_corr, _ = stats.spearmanr(d_true_vec, d_obs_vec)
+
+    # Mean relative error
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rel_err = np.abs(d_obs_vec - d_true_vec) / np.where(d_true_vec > 0, d_true_vec, np.nan)
+    mean_rel_err = float(np.nanmean(rel_err))
+
+    return {
+        'mantel_r': float(mantel_r),
+        'mantel_p': float(mantel_p),
+        'rank_correlation': float(rank_corr),
+        'mean_relative_error': mean_rel_err,
+    }
+
+
+def permanova_r2(
+    D: np.ndarray,
+    y: np.ndarray,
+    n_permutations: int = 999
+) -> Dict:
+    """
+    PERMANOVA: partition total sum of squared distances by group labels.
+
+    Parameters:
+    -----------
+    D : np.ndarray
+        Pairwise distance matrix (n x n)
+    y : np.ndarray
+        Group labels (length n)
+    n_permutations : int
+        Number of permutations for significance testing
+
+    Returns:
+    --------
+    Dict with r2, pseudo_f, p_value
+    """
+    n = len(y)
+    groups = np.unique(y)
+
+    # Squared distances
+    D2 = D ** 2
+
+    # Total sum of squared distances / n
+    ss_total = np.sum(D2) / (2 * n)
+
+    # Within-group sum of squared distances
+    ss_within = 0.0
+    for g in groups:
+        mask = y == g
+        n_g = mask.sum()
+        if n_g > 1:
+            ss_within += np.sum(D2[np.ix_(mask, mask)]) / (2 * n_g)
+
+    ss_between = ss_total - ss_within
+    r2 = ss_between / ss_total if ss_total > 0 else 0.0
+
+    # Pseudo-F
+    n_groups = len(groups)
+    df_between = n_groups - 1
+    df_within = n - n_groups
+    if df_within > 0 and ss_within > 0:
+        pseudo_f = (ss_between / df_between) / (ss_within / df_within)
+    else:
+        pseudo_f = np.nan
+
+    # Permutation test
+    count_ge = 0
+    for _ in range(n_permutations):
+        y_perm = np.random.permutation(y)
+        ss_within_perm = 0.0
+        for g in groups:
+            mask_p = y_perm == g
+            n_g_p = mask_p.sum()
+            if n_g_p > 1:
+                ss_within_perm += np.sum(D2[np.ix_(mask_p, mask_p)]) / (2 * n_g_p)
+        ss_between_perm = ss_total - ss_within_perm
+        if df_within > 0 and ss_within_perm > 0:
+            f_perm = (ss_between_perm / df_between) / (ss_within_perm / df_within)
+        else:
+            f_perm = 0.0
+        if f_perm >= pseudo_f:
+            count_ge += 1
+
+    p_value = (count_ge + 1) / (n_permutations + 1)
+
+    return {
+        'r2': float(r2),
+        'pseudo_f': float(pseudo_f),
+        'p_value': float(p_value),
+    }
 
 
 def analyze_classification(

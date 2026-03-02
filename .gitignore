@@ -29,6 +29,23 @@ results/
 experiments/
 *.log
 
+# LaTeX auxiliary files
+*.aux
+*.bbl
+*.blg
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Downloaded data
+manuscript_latex/data/*.xlsx
+manuscript_latex/data/*.csv
+
 # OS files
 .DS_Store
 Thumbs.db
+
+# Claude.md
+CLAUDE.md
