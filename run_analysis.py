@@ -1766,25 +1766,23 @@ def analysis_15_distribution_log_comparison():
                         distribution=dist, lod_percentile=0.1,
                         lod_handling='substitute', **dil_params,
                     )
-                    X_true = dataset['X_true']
                     X_obs  = dataset['X_obs']
                     y      = dataset['y']
 
-                    # Scale-matched truth references
-                    p_true_raw, _ = analyze_univariate(X_true, y, 't_test')
-                    p_true_log, _ = analyze_univariate(
-                        np.log(np.maximum(X_true, 0) + eps), y, 't_test')
+                    # Truth from known group means (scale-independent)
+                    truly_diff = dataset['truly_differential']
+                    p_true_known = np.where(truly_diff, 0.0, 1.0)
 
                     for method in norm_methods:
                         X_norm = normalize_data(X_obs, method)
 
                         if method == 'clr':
-                            scales = [('log', X_norm, p_true_log)]
+                            scales = [('log', X_norm, p_true_known)]
                         else:
                             X_log = np.log(np.maximum(X_norm, 0) + eps)
                             scales = [
-                                ('raw', X_norm,  p_true_raw),
-                                ('log', X_log,   p_true_log),
+                                ('raw', X_norm,  p_true_known),
+                                ('log', X_log,   p_true_known),
                             ]
 
                         for scale_label, X_eval, p_truth in scales:
@@ -1964,12 +1962,12 @@ def analysis_16_correlated_reference():
                         dilution_alpha=5.0, dilution_beta=5.0,
                         ref_group_effect=rge, ref_analyte_corr=rac,
                     )
-                    X_true = dataset['X_true']
                     X_obs = dataset['X_obs']
                     y = dataset['y']
 
-                    # Truth reference
-                    p_true, _ = analyze_univariate(X_true, y, 't_test')
+                    # Truth from known group means (not sample p-values)
+                    truly_diff = dataset['truly_differential']
+                    p_true = np.where(truly_diff, 0.0, 1.0)
 
                     for method in norm_methods:
                         X_norm = normalize_data(X_obs, method)

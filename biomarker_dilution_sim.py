@@ -745,6 +745,9 @@ def generate_dataset(
         handling_method=lod_handling
     )
     
+    # Determine which biomarkers are truly differential (from known means)
+    truly_differential = ~np.isclose(group_means[0], group_means[1])
+
     # Return all relevant data and parameters
     return {
         'X_true': X_true,
@@ -755,6 +758,7 @@ def generate_dataset(
         'lods': lods,
         'corr_matrix': corr_matrix,
         'group_means': group_means,
+        'truly_differential': truly_differential,
         'params': params
     }
 
