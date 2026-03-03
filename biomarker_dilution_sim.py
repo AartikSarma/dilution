@@ -1294,26 +1294,25 @@ def analyze_univariate(
     n_biomarkers = X.shape[1]
     unique_groups = np.unique(y)
     n_groups = len(unique_groups)
-    
+
+    # Fast vectorized path for the common 2-group t-test case
+    if test_type == 't_test' and n_groups == 2:
+        g0 = X[y == unique_groups[0]]
+        g1 = X[y == unique_groups[1]]
+        test_stats, p_values = stats.ttest_ind(g0, g1, axis=0, equal_var=False)
+        return p_values, test_stats
+
     p_values = np.zeros(n_biomarkers)
     test_stats = np.zeros(n_biomarkers)
-    
+
     for j in range(n_biomarkers):
         if test_type == 't_test':
-            if n_groups == 2:
-                # Two-sample t-test
-                group0 = X[y == unique_groups[0], j]
-                group1 = X[y == unique_groups[1], j]
-                t_stat, p_val = stats.ttest_ind(group0, group1, equal_var=False)
-                test_stats[j] = t_stat
-                p_values[j] = p_val
-            else:
-                # One-way ANOVA
-                groups = [X[y == group, j] for group in unique_groups]
-                f_stat, p_val = stats.f_oneway(*groups)
-                test_stats[j] = f_stat
-                p_values[j] = p_val
-        
+            # One-way ANOVA (n_groups > 2)
+            groups = [X[y == group, j] for group in unique_groups]
+            f_stat, p_val = stats.f_oneway(*groups)
+            test_stats[j] = f_stat
+            p_values[j] = p_val
+
         elif test_type == 'wilcoxon':
             if n_groups == 2:
                 # Wilcoxon rank-sum test
@@ -1328,7 +1327,7 @@ def analyze_univariate(
                 h_stat, p_val = stats.kruskal(*groups)
                 test_stats[j] = h_stat
                 p_values[j] = p_val
-    
+
     return p_values, test_stats
 
 

@@ -24,6 +24,8 @@ from pathlib import Path
 import json
 import warnings
 import time
+import shutil
+import multiprocessing as mp
 
 warnings.filterwarnings('ignore')
 
@@ -1921,6 +1923,81 @@ def analysis_15_distribution_log_comparison():
     return df
 
 
+def _analysis_16_pool_init():
+    """Limit BLAS threads in worker processes to avoid contention."""
+    import os
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OMP_NUM_THREADS'] = '1'
+    # Force OpenBLAS to respect the new setting
+    try:
+        import ctypes
+        libopenblas = ctypes.CDLL("libopenblas64_.dylib")
+        libopenblas.openblas_set_num_threads(1)
+    except (OSError, AttributeError):
+        pass
+
+
+def _analysis_16_worker(args):
+    """Worker for one (rge, rac, rep) combination in analysis_16."""
+    rge, rac, rep = args
+    norm_methods = ['none', 'total_sum', 'pqn', 'clr', 'median',
+                    'quantile', 'reference']
+    from sklearn.model_selection import StratifiedKFold
+    results = []
+    try:
+        np.random.seed(42 + rep)
+        dataset = generate_dataset(
+            n_subjects=100, n_biomarkers=500, n_groups=2,
+            correlation_type='moderate', effect_size=0.8,
+            distribution='lognormal', lod_percentile=0.1,
+            lod_handling='substitute',
+            dilution_alpha=5.0, dilution_beta=5.0,
+            ref_group_effect=rge, ref_analyte_corr=rac,
+        )
+        X_obs = dataset['X_obs']
+        y = dataset['y']
+        truly_diff = dataset['truly_differential']
+        p_true = np.where(truly_diff, 0.0, 1.0)
+
+        for method in norm_methods:
+            X_norm = normalize_data(X_obs, method)
+
+            p_obs, _ = analyze_univariate(X_norm, y, 't_test')
+            uni = evaluate_univariate(p_true, p_obs)
+
+            D_euc = compute_distance_matrix(X_norm, 'euclidean')
+            perm_euc = permanova_r2(D_euc, y, n_permutations=199)
+
+            labels = analyze_clustering(X_norm, n_clusters=2)
+            clust = evaluate_clustering(y, labels)
+
+            skf = StratifiedKFold(n_splits=5, shuffle=True,
+                                  random_state=42 + rep)
+            fold_accs = []
+            for train_idx, test_idx in skf.split(X_norm, y):
+                proba = analyze_classification(
+                    X_norm[train_idx], y[train_idx],
+                    X_norm[test_idx], 'logistic')
+                cls = evaluate_classification(y[test_idx], proba)
+                fold_accs.append(cls['accuracy'])
+
+            results.append({
+                'ref_group_effect': rge,
+                'ref_analyte_corr': rac,
+                'replication': rep,
+                'norm_method': method,
+                'power': uni['power'],
+                'type_i_error': uni['type_i_error'],
+                'permanova_r2': perm_euc['r2'],
+                'clustering_ari': clust['adjusted_rand_index'],
+                'classification_acc': float(np.mean(fold_accs)),
+            })
+    except Exception as e:
+        print(f"  Warning: rep {rep} failed (rge={rge}/rac={rac}): {e}")
+    return results
+
+
 def analysis_16_correlated_reference():
     """Correlated reference biomarker simulation (Figure 10, Figure E23).
 
@@ -1932,86 +2009,27 @@ def analysis_16_correlated_reference():
     print("Analysis 16: Correlated Reference Biomarker")
     print("=" * 60)
 
-    np.random.seed(42)
-
     ref_group_effects = [0.0, 0.25, 0.5, 0.75, 1.0]
     ref_analyte_corrs = [0.0, 0.3, 0.5, 0.7, 0.9]
     norm_methods = ['none', 'total_sum', 'pqn', 'clr', 'median',
                     'quantile', 'reference']
     n_replications = 20
-    all_results = []
 
-    total_combos = len(ref_group_effects) * len(ref_analyte_corrs)
-    combo_idx = 0
+    # Build task list for parallel execution
+    tasks = [(rge, rac, rep)
+             for rge in ref_group_effects
+             for rac in ref_analyte_corrs
+             for rep in range(n_replications)]
 
-    for rge in ref_group_effects:
-        for rac in ref_analyte_corrs:
-            combo_idx += 1
-            print(f"  [{combo_idx}/{total_combos}] "
-                  f"ref_group_effect={rge}, ref_analyte_corr={rac} "
-                  f"({n_replications} reps)...")
+    n_workers = min(mp.cpu_count(), 8)
+    print(f"  Running {len(tasks)} tasks across {n_workers} workers "
+          f"(p=500 biomarkers)...")
 
-            for rep in range(n_replications):
-                np.random.seed(42 + rep)
-                try:
-                    dataset = generate_dataset(
-                        n_subjects=100, n_biomarkers=10, n_groups=2,
-                        correlation_type='moderate', effect_size=0.8,
-                        distribution='lognormal', lod_percentile=0.1,
-                        lod_handling='substitute',
-                        dilution_alpha=5.0, dilution_beta=5.0,
-                        ref_group_effect=rge, ref_analyte_corr=rac,
-                    )
-                    X_obs = dataset['X_obs']
-                    y = dataset['y']
+    ctx = mp.get_context('fork')
+    with ctx.Pool(n_workers, initializer=_analysis_16_pool_init) as pool:
+        nested_results = pool.map(_analysis_16_worker, tasks, chunksize=5)
 
-                    # Truth from known group means (not sample p-values)
-                    truly_diff = dataset['truly_differential']
-                    p_true = np.where(truly_diff, 0.0, 1.0)
-
-                    for method in norm_methods:
-                        X_norm = normalize_data(X_obs, method)
-
-                        # --- Univariate ---
-                        p_obs, _ = analyze_univariate(X_norm, y, 't_test')
-                        uni = evaluate_univariate(p_true, p_obs)
-
-                        # --- PERMANOVA R² (Euclidean) ---
-                        D_euc = compute_distance_matrix(X_norm, 'euclidean')
-                        perm_euc = permanova_r2(D_euc, y, n_permutations=199)
-
-                        # --- Clustering ARI ---
-                        labels = analyze_clustering(X_norm, n_clusters=2)
-                        clust = evaluate_clustering(y, labels)
-
-                        # --- Classification accuracy (5-fold CV) ---
-                        from sklearn.model_selection import StratifiedKFold
-                        skf = StratifiedKFold(n_splits=5, shuffle=True,
-                                              random_state=42 + rep)
-                        fold_accs = []
-                        for train_idx, test_idx in skf.split(X_norm, y):
-                            proba = analyze_classification(
-                                X_norm[train_idx], y[train_idx],
-                                X_norm[test_idx], 'logistic')
-                            cls = evaluate_classification(y[test_idx], proba)
-                            fold_accs.append(cls['accuracy'])
-                        cv_acc = float(np.mean(fold_accs))
-
-                        all_results.append({
-                            'ref_group_effect': rge,
-                            'ref_analyte_corr': rac,
-                            'replication': rep,
-                            'norm_method': method,
-                            'power': uni['power'],
-                            'type_i_error': uni['type_i_error'],
-                            'permanova_r2': perm_euc['r2'],
-                            'clustering_ari': clust['adjusted_rand_index'],
-                            'classification_acc': cv_acc,
-                        })
-
-                except Exception as e:
-                    print(f"    Warning: rep {rep} failed "
-                          f"(rge={rge}/rac={rac}): {e}")
+    all_results = [r for batch in nested_results for r in batch]
 
     df = pd.DataFrame(all_results)
     df.to_csv(RESULTS_DIR / 'correlated_reference_results.csv', index=False)
@@ -2229,6 +2247,13 @@ def main():
     print(f"Figures saved to: {FIGURES_DIR}/")
     print(f"Results saved to: {RESULTS_DIR}/")
     print("=" * 60)
+
+    # Sync figures to manuscript directory
+    manuscript_fig_dir = Path('manuscript_latex/figures')
+    if manuscript_fig_dir.exists():
+        for f in FIGURES_DIR.glob('*'):
+            shutil.copy2(f, manuscript_fig_dir / f.name)
+        print(f"Figures synced to {manuscript_fig_dir}/")
 
     # Summary of all outputs
     print("\nGenerated Figures:")
