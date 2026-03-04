@@ -113,39 +113,50 @@ def generate_group_means(
     n_biomarkers: int,
     n_groups: int,
     effect_sizes: Union[float, List[float], np.ndarray] = 1.0,
-    biomarker_scales: Optional[np.ndarray] = None
+    biomarker_scales: Optional[np.ndarray] = None,
+    positive_fraction: float = 0.5,
 ) -> np.ndarray:
     """
     Generate mean values for each group and biomarker with specified effect sizes.
+
+    Parameters
+    ----------
+    positive_fraction : float
+        Fraction of differential biomarkers with positive (elevated) effect
+        in non-baseline groups.  Default 0.5 gives random direction.
+        Set to 1.0 to model scenarios where all biomarkers go up in
+        disease (e.g. inflammatory panel in ARDS).
     """
     if biomarker_scales is None:
         # Default biomarker scales (can vary by orders of magnitude)
         biomarker_scales = 10 ** np.random.uniform(-1, 3, size=n_biomarkers)
-    
+
     # Standardize effect_sizes to array
     if isinstance(effect_sizes, (int, float)):
         effect_sizes = np.ones(n_biomarkers) * effect_sizes
-    
+
     # Initialize means array
     group_means = np.zeros((n_groups, n_biomarkers))
-    
+
     # First group is baseline
     group_means[0, :] = biomarker_scales
-    
+
     # Generate means for other groups with effect sizes
     for g in range(1, n_groups):
-        # Group-specific factor (to create different patterns between groups)
-        group_factor = np.random.choice([-1, 1], size=n_biomarkers)
-        
+        # Direction of effect: positive_fraction controls concordance
+        group_factor = np.where(
+            np.random.random(n_biomarkers) < positive_fraction, 1, -1
+        )
+
         # Some biomarkers may not differ between groups
         differential_markers = np.random.choice(
             [0, 1], size=n_biomarkers, p=[0.3, 0.7]
         )
-        
+
         # Set means with specified effect sizes
         effect = effect_sizes * differential_markers * group_factor
         group_means[g, :] = group_means[0, :] * (1 + effect)
-    
+
     return group_means
 
 
@@ -639,6 +650,7 @@ def generate_dataset(
     biomarker_scales: Optional[np.ndarray] = None,
     ref_group_effect: Optional[float] = None,
     ref_analyte_corr: Optional[Union[float, np.ndarray]] = None,
+    positive_fraction: float = 0.5,
 ) -> Dict:
     """
     Generate a complete dataset with true and observed biomarker concentrations.
@@ -682,7 +694,7 @@ def generate_dataset(
     if ref_analyte_corr is not None:
         rac = np.atleast_1d(ref_analyte_corr)
         if rac.size == 1:
-            rac = np.full(n_biomarkers - 1, float(rac))
+            rac = np.full(n_biomarkers - 1, float(rac.item()))
         corr_matrix[0, 1:] = rac
         corr_matrix[1:, 0] = rac
         # Ensure positive definiteness via eigenvalue clipping
@@ -706,13 +718,22 @@ def generate_dataset(
         n_biomarkers=n_biomarkers,
         n_groups=n_groups,
         effect_sizes=effect_size,
-        biomarker_scales=biomarker_scales
+        biomarker_scales=biomarker_scales,
+        positive_fraction=positive_fraction,
     )
 
-    # Override reference biomarker (column 0) group effect if specified
+    # Override reference biomarker (column 0) group effect if specified.
+    # ref_group_effect scales RELATIVE to effect_size: rge=1.0 means the
+    # reference is elevated by the same amount as a typical differential
+    # analyte (e.g. total protein ∝ inflammatory markers).  This ensures
+    # that dividing by a proportionally-elevated reference cancels the
+    # shared signal (power loss), matching biological reality.
     if ref_group_effect is not None:
+        es_scalar = (float(effect_size) if isinstance(effect_size, (int, float))
+                     else float(np.mean(effect_size)))
         for g in range(1, n_groups):
-            group_means[g, 0] = group_means[0, 0] * (1 + ref_group_effect)
+            group_means[g, 0] = group_means[0, 0] * (
+                1 + ref_group_effect * es_scalar)
 
     # Generate true biomarker data
     X_true, y = generate_true_biomarker_data(
@@ -1576,6 +1597,215 @@ def permanova_r2(
         'r2': float(r2),
         'pseudo_f': float(pseudo_f),
         'p_value': float(p_value),
+    }
+
+
+def hotellings_t2_test(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_permutations: int = 999
+) -> dict:
+    """
+    Hotelling's T² test comparing two group centroids in multivariate space.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Data matrix (n_samples × n_features), e.g. PCA scores.
+    y : np.ndarray
+        Binary group labels (0/1).
+    n_permutations : int
+        Number of permutations for the permutation p-value.
+
+    Returns
+    -------
+    dict with keys: t2_statistic, f_statistic, parametric_p, permutation_p
+    """
+    groups = np.unique(y)
+    if len(groups) != 2:
+        return {'t2_statistic': np.nan, 'f_statistic': np.nan,
+                'parametric_p': np.nan, 'permutation_p': np.nan}
+
+    mask0 = y == groups[0]
+    mask1 = y == groups[1]
+    X0 = X[mask0]
+    X1 = X[mask1]
+    n0, n1 = X0.shape[0], X1.shape[0]
+    p = X.shape[1]
+
+    if n0 < 2 or n1 < 2 or (n0 + n1 - 2) < p:
+        # Not enough samples for parametric test; fall back to permutation only
+        mean_diff = X0.mean(axis=0) - X1.mean(axis=0)
+        t2_obs = float(np.dot(mean_diff, mean_diff) * (n0 * n1) / (n0 + n1))
+        count_ge = 0
+        for _ in range(n_permutations):
+            y_perm = np.random.permutation(y)
+            X0p = X[y_perm == groups[0]]
+            X1p = X[y_perm == groups[1]]
+            diff_p = X0p.mean(axis=0) - X1p.mean(axis=0)
+            t2_p = float(np.dot(diff_p, diff_p) * (n0 * n1) / (n0 + n1))
+            if t2_p >= t2_obs:
+                count_ge += 1
+        perm_p = (count_ge + 1) / (n_permutations + 1)
+        return {'t2_statistic': t2_obs, 'f_statistic': np.nan,
+                'parametric_p': np.nan, 'permutation_p': float(perm_p)}
+
+    mean_diff = X0.mean(axis=0) - X1.mean(axis=0)
+
+    # Pooled within-group covariance
+    S0 = np.cov(X0, rowvar=False, ddof=1)
+    S1 = np.cov(X1, rowvar=False, ddof=1)
+    S_pooled = ((n0 - 1) * S0 + (n1 - 1) * S1) / (n0 + n1 - 2)
+
+    # Use pseudo-inverse for robustness to singular covariance
+    S_inv = np.linalg.pinv(S_pooled)
+
+    # T² statistic
+    t2_obs = float((n0 * n1) / (n0 + n1) * mean_diff @ S_inv @ mean_diff)
+
+    # F-approximation
+    df1 = p
+    df2 = n0 + n1 - p - 1
+    if df2 > 0:
+        f_stat = t2_obs * df2 / (p * (n0 + n1 - 2))
+        from scipy import stats as sp_stats
+        parametric_p = float(1 - sp_stats.f.cdf(f_stat, df1, df2))
+    else:
+        f_stat = np.nan
+        parametric_p = np.nan
+
+    # Permutation test
+    count_ge = 0
+    for _ in range(n_permutations):
+        y_perm = np.random.permutation(y)
+        X0p = X[y_perm == groups[0]]
+        X1p = X[y_perm == groups[1]]
+        diff_p = X0p.mean(axis=0) - X1p.mean(axis=0)
+        t2_p = float((n0 * n1) / (n0 + n1) * diff_p @ S_inv @ diff_p)
+        if t2_p >= t2_obs:
+            count_ge += 1
+
+    perm_p = (count_ge + 1) / (n_permutations + 1)
+
+    return {
+        't2_statistic': float(t2_obs),
+        'f_statistic': float(f_stat),
+        'parametric_p': float(parametric_p),
+        'permutation_p': float(perm_p),
+    }
+
+
+def centroid_distance_test(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_permutations: int = 999
+) -> dict:
+    """
+    Permutation test on Euclidean distance between group centroids.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Data matrix (n_samples × n_features).
+    y : np.ndarray
+        Binary group labels (0/1).
+    n_permutations : int
+        Number of permutations.
+
+    Returns
+    -------
+    dict with keys: centroid_distance, permutation_p
+    """
+    groups = np.unique(y)
+    if len(groups) != 2:
+        return {'centroid_distance': np.nan, 'permutation_p': np.nan}
+
+    mask0 = y == groups[0]
+    mask1 = y == groups[1]
+    centroid0 = X[mask0].mean(axis=0)
+    centroid1 = X[mask1].mean(axis=0)
+    dist_obs = float(np.linalg.norm(centroid0 - centroid1))
+
+    count_ge = 0
+    for _ in range(n_permutations):
+        y_perm = np.random.permutation(y)
+        c0 = X[y_perm == groups[0]].mean(axis=0)
+        c1 = X[y_perm == groups[1]].mean(axis=0)
+        dist_perm = float(np.linalg.norm(c0 - c1))
+        if dist_perm >= dist_obs:
+            count_ge += 1
+
+    perm_p = (count_ge + 1) / (n_permutations + 1)
+
+    return {
+        'centroid_distance': dist_obs,
+        'permutation_p': float(perm_p),
+    }
+
+
+def pca_centroid_analysis(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_components: int = 2,
+    n_permutations: int = 999,
+    scale: bool = True
+) -> dict:
+    """
+    Convenience wrapper: StandardScaler → PCA → centroid tests.
+
+    Runs Hotelling's T², PERMANOVA on PCA scores, and centroid distance test.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Data matrix (n_samples × n_features).
+    y : np.ndarray
+        Binary group labels.
+    n_components : int
+        Number of PCA components to retain.
+    n_permutations : int
+        Number of permutations for all tests.
+    scale : bool
+        Whether to standardize before PCA.
+
+    Returns
+    -------
+    dict with aggregated results from all three tests plus variance explained.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_prep = X.copy()
+    if scale:
+        X_prep = StandardScaler().fit_transform(X_prep)
+
+    n_components = min(n_components, X_prep.shape[0], X_prep.shape[1])
+    pca = PCA(n_components=n_components)
+    X_pca = pca.fit_transform(X_prep)
+
+    variance_explained = float(pca.explained_variance_ratio_.sum())
+
+    # Hotelling's T²
+    hotelling = hotellings_t2_test(X_pca, y, n_permutations)
+
+    # PERMANOVA on PCA scores
+    D = compute_distance_matrix(X_pca, 'euclidean')
+    permanova = permanova_r2(D, y, n_permutations)
+
+    # Centroid distance
+    centroid = centroid_distance_test(X_pca, y, n_permutations)
+
+    return {
+        'n_components': n_components,
+        'variance_explained': variance_explained,
+        'hotelling_t2': hotelling['t2_statistic'],
+        'hotelling_f': hotelling['f_statistic'],
+        'hotelling_parametric_p': hotelling['parametric_p'],
+        'hotelling_permutation_p': hotelling['permutation_p'],
+        'permanova_r2': permanova['r2'],
+        'permanova_p': permanova['p_value'],
+        'centroid_distance': centroid['centroid_distance'],
+        'centroid_distance_p': centroid['permutation_p'],
     }
 
 

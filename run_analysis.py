@@ -44,6 +44,7 @@ from biomarker_dilution_sim import (
     evaluate_clustering, evaluate_classification,
     run_single_simulation, apply_dilution, centered_log_ratio,
     compute_distance_matrix, evaluate_distance_matrix, permanova_r2,
+    hotellings_t2_test, centroid_distance_test, pca_centroid_analysis,
 )
 from visualization_module import (
     plot_dilution_effect, plot_normalization_comparison,
@@ -2206,6 +2207,676 @@ def analysis_16_correlated_reference():
     return df
 
 
+def _analysis_17_pool_init():
+    """Limit BLAS threads in worker processes to avoid contention."""
+    import os
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OMP_NUM_THREADS'] = '1'
+    try:
+        import ctypes
+        libopenblas = ctypes.CDLL("libopenblas64_.dylib")
+        libopenblas.openblas_set_num_threads(1)
+    except (OSError, AttributeError):
+        pass
+
+
+def _analysis_17_worker(args):
+    """Worker for one (severity, effect_size, preproc, norm, n_comp, rep)."""
+    (severity, effect_size, preproc_label, do_log, do_scale,
+     norm_method, n_comp, rep) = args
+    from sklearn.decomposition import PCA as _PCA
+    from sklearn.preprocessing import StandardScaler as _SS
+
+    severity_params = {
+        'Mild':     {'alpha': 8.0, 'beta': 8.0},
+        'Moderate': {'alpha': 5.0, 'beta': 5.0},
+        'Severe':   {'alpha': 2.0, 'beta': 5.0},
+    }
+    params = severity_params[severity]
+
+    results = []
+    try:
+        np.random.seed(42 + rep * 1000 + hash((severity, effect_size)) % 1000)
+        dataset = generate_dataset(
+            n_subjects=100, n_biomarkers=50, n_groups=2,
+            correlation_type='moderate', effect_size=effect_size,
+            distribution='lognormal', lod_percentile=0.1,
+            lod_handling='substitute',
+            dilution_alpha=params['alpha'], dilution_beta=params['beta'],
+        )
+        X_obs = dataset['X_obs']
+        y = dataset['y']
+
+        X_norm = normalize_data(X_obs, norm_method)
+
+        # Preprocessing
+        X_prep = X_norm.copy()
+        if do_log and norm_method != 'clr':
+            X_prep = np.maximum(X_prep, 0) + 1e-5
+            X_prep = np.log(X_prep)
+        if do_scale:
+            X_prep = _SS().fit_transform(X_prep)
+
+        nc = min(n_comp, X_prep.shape[0], X_prep.shape[1])
+        pca = _PCA(n_components=nc)
+        X_pca = pca.fit_transform(X_prep)
+        var_explained = float(pca.explained_variance_ratio_.sum())
+
+        # Hotelling's T²
+        hot = hotellings_t2_test(X_pca, y, n_permutations=199)
+
+        # PERMANOVA on PCA scores
+        D = compute_distance_matrix(X_pca, 'euclidean')
+        perm = permanova_r2(D, y, n_permutations=199)
+
+        # Centroid distance
+        cdist = centroid_distance_test(X_pca, y, n_permutations=199)
+
+        results.append({
+            'severity': severity,
+            'effect_size': effect_size,
+            'preprocessing': preproc_label,
+            'norm_method': norm_method,
+            'n_components': nc,
+            'replication': rep,
+            'variance_explained': var_explained,
+            'hotelling_t2': hot['t2_statistic'],
+            'hotelling_perm_p': hot['permutation_p'],
+            'hotelling_reject': int(hot['permutation_p'] < 0.05),
+            'permanova_r2': perm['r2'],
+            'permanova_p': perm['p_value'],
+            'permanova_reject': int(perm['p_value'] < 0.05),
+            'centroid_distance': cdist['centroid_distance'],
+            'centroid_distance_p': cdist['permutation_p'],
+            'centroid_distance_reject': int(cdist['permutation_p'] < 0.05),
+        })
+    except Exception as e:
+        print(f"  Warning: rep {rep} failed "
+              f"({severity}/es={effect_size}/{norm_method}/{preproc_label}): {e}")
+    return results
+
+
+def analysis_17_pca_centroid_comparison():
+    """PCA centroid comparison methods (Figure 11, Figures E24-E25).
+
+    Evaluates how effect size, dilution severity, and preprocessing affect
+    the ability to detect group differences in PCA space using Hotelling's
+    T², PERMANOVA, and centroid distance permutation tests.
+    """
+    print("\n" + "=" * 60)
+    print("Analysis 17: PCA Centroid Comparison Methods")
+    print("=" * 60)
+
+    severities = ['Mild', 'Moderate', 'Severe']
+    effect_sizes = [0.2, 0.4, 0.6, 0.8]
+    preproc_configs = [
+        ('raw',        False, False),
+        ('log',        True,  False),
+        ('scaled',     False, True),
+        ('log+scaled', True,  True),
+    ]
+    norm_methods = ['none', 'total_sum', 'pqn', 'clr', 'median', 'quantile']
+    n_components_list = [2, 5]
+    n_replications = 50
+
+    # Build task list
+    tasks = []
+    for severity in severities:
+        for es in effect_sizes:
+            for preproc_label, do_log, do_scale in preproc_configs:
+                for norm in norm_methods:
+                    for nc in n_components_list:
+                        for rep in range(n_replications):
+                            tasks.append((severity, es, preproc_label,
+                                          do_log, do_scale, norm, nc, rep))
+
+    n_workers = min(mp.cpu_count(), 8)
+    print(f"  Running {len(tasks)} tasks across {n_workers} workers...")
+
+    ctx = mp.get_context('fork')
+    with ctx.Pool(n_workers, initializer=_analysis_17_pool_init) as pool:
+        nested_results = pool.map(_analysis_17_worker, tasks, chunksize=10)
+
+    all_results = [r for batch in nested_results for r in batch]
+    df = pd.DataFrame(all_results)
+    df.to_csv(RESULTS_DIR / 'pca_centroid_results.csv', index=False)
+    print(f"  Total rows: {len(df)}")
+
+    # ------------------------------------------------------------------
+    # Summary CSV
+    # ------------------------------------------------------------------
+    summary = df.groupby(
+        ['severity', 'effect_size', 'preprocessing', 'norm_method',
+         'n_components']).agg(
+        hotelling_power=('hotelling_reject', 'mean'),
+        permanova_power=('permanova_reject', 'mean'),
+        centroid_power=('centroid_distance_reject', 'mean'),
+        hotelling_t2_mean=('hotelling_t2', 'mean'),
+        permanova_r2_mean=('permanova_r2', 'mean'),
+        centroid_dist_mean=('centroid_distance', 'mean'),
+        variance_explained_mean=('variance_explained', 'mean'),
+    ).round(4).reset_index()
+    summary.to_csv(RESULTS_DIR / 'pca_centroid_summary.csv', index=False)
+
+    # ------------------------------------------------------------------
+    # Common definitions for figures
+    # ------------------------------------------------------------------
+    test_cols = ['hotelling_power', 'permanova_power', 'centroid_power']
+    test_labels = ["Hotelling's T²", 'PERMANOVA', 'Centroid Distance']
+    method_palette = dict(zip(norm_methods, CB_PALETTE[:len(norm_methods)]))
+
+    # Display labels: annotate CLR to flag inherent log-ratio transform
+    norm_display = {m: m for m in norm_methods}
+    norm_display['clr'] = 'clr (log-ratio)'
+
+    # Non-CLR methods for line-plot comparisons where CLR is a reference
+    non_clr_methods = [m for m in norm_methods if m != 'clr']
+
+    # ------------------------------------------------------------------
+    # Figure 11: 3×4 heatmaps — rows = test methods, cols = effect sizes
+    # Moderate dilution, n_components=2, norm × preprocessing
+    # CLR row annotated; footnote explains CLR includes log transform
+    # ------------------------------------------------------------------
+    sub = summary[(summary['n_components'] == 2) &
+                  (summary['severity'] == 'Moderate')].copy()
+
+    fig, axes = plt.subplots(3, 4, figsize=(24, 16))
+    panel_letters = [
+        ['A', 'B', 'C', 'D'],
+        ['E', 'F', 'G', 'H'],
+        ['I', 'J', 'K', 'L'],
+    ]
+
+    for row_idx, (tcol, tlab) in enumerate(zip(test_cols, test_labels)):
+        for col_idx, es in enumerate(effect_sizes):
+            ax = axes[row_idx, col_idx]
+            sub_es = sub[sub['effect_size'] == es]
+
+            pivot = sub_es.pivot_table(
+                index='norm_method', columns='preprocessing',
+                values=tcol, aggfunc='first')
+            norm_order = [m for m in norm_methods if m in pivot.index]
+            preproc_order = [p for p in ['raw', 'log', 'scaled', 'log+scaled']
+                            if p in pivot.columns]
+            pivot = pivot.reindex(index=norm_order, columns=preproc_order)
+
+            # Relabel index for display
+            pivot.index = [norm_display.get(m, m) for m in pivot.index]
+
+            sns.heatmap(pivot, annot=True, fmt='.2f', cmap='viridis',
+                        vmin=0, vmax=1, ax=ax, linewidths=0.5,
+                        cbar_kws={'label': 'Power'})
+            letter = panel_letters[row_idx][col_idx]
+            ax.set_title(f'({letter}) {tlab}\nEffect size = {es}',
+                         fontweight='bold', fontsize=10)
+            if col_idx > 0:
+                ax.set_ylabel('')
+            if row_idx < 2:
+                ax.set_xlabel('')
+
+    fig.suptitle('Figure 11: PCA Centroid Comparison — Power by Test Method, '
+                 'Effect Size, Normalization, and Preprocessing\n'
+                 '(Moderate dilution, n_components=2, '
+                 '50 replications, permutation p < 0.05)',
+                 fontsize=14, fontweight='bold', y=1.03)
+    fig.text(0.5, -0.01,
+             'Note: CLR inherently log-transforms, so its "raw" and "log" '
+             'columns are equivalent. Fair comparison to CLR is other '
+             'methods with log preprocessing.',
+             ha='center', fontsize=10, fontstyle='italic')
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'fig11_pca_centroid_comparison.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'fig11_pca_centroid_comparison.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure E24: 4×3 line plots — power vs effect size
+    # Rows = preprocessing, cols = test methods
+    # Non-CLR methods as solid lines; CLR as dashed reference line
+    # (CLR value is constant across preprocessing since it skips log)
+    # Fixed: Moderate dilution, n_components=2
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(4, 3, figsize=(20, 20))
+    sub2 = summary[(summary['n_components'] == 2) &
+                   (summary['severity'] == 'Moderate')].copy()
+
+    # Pre-compute CLR reference (use 'scaled' preprocessing — equivalent
+    # to any other since CLR skips log)
+    clr_ref = sub2[(sub2['norm_method'] == 'clr') &
+                   (sub2['preprocessing'] == 'scaled')].sort_values(
+                       'effect_size')
+
+    for row_idx, preproc in enumerate(['raw', 'log', 'scaled', 'log+scaled']):
+        sub_pp = sub2[sub2['preprocessing'] == preproc]
+        for col_idx, (tcol, tlab) in enumerate(zip(test_cols, test_labels)):
+            ax = axes[row_idx, col_idx]
+
+            # Plot non-CLR methods as solid lines
+            for nm in non_clr_methods:
+                sub_nm = sub_pp[sub_pp['norm_method'] == nm].sort_values(
+                    'effect_size')
+                if len(sub_nm) == 0:
+                    continue
+                ax.plot(sub_nm['effect_size'], sub_nm[tcol], 'o-',
+                        color=method_palette[nm], label=nm,
+                        linewidth=1.5, markersize=5)
+
+            # CLR as dashed reference line
+            if len(clr_ref) > 0:
+                ax.plot(clr_ref['effect_size'], clr_ref[tcol], 's--',
+                        color=method_palette['clr'],
+                        label='clr (ref, includes log)',
+                        linewidth=2, markersize=6, alpha=0.8)
+
+            ax.set_xlabel('Effect Size')
+            ax.set_ylabel('Power')
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_title(f'{preproc} — {tlab}', fontweight='bold',
+                         fontsize=10)
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(fontsize=7, loc='lower right')
+
+    fig.suptitle('Figure E24: PCA Centroid Detail — Power vs Effect Size\n'
+                 '(Moderate dilution, n_components=2; '
+                 'CLR shown as reference — inherently log-transforms)',
+                 fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'figE24_pca_centroid_detail.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'figE24_pca_centroid_detail.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure E25: 2×3 bars — n_components=2 vs 5
+    # At effect_size=0.4 (informative range), Moderate dilution
+    # Only log+scaled preprocessing (fair comparison including CLR)
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+    for row_idx, nc in enumerate(n_components_list):
+        sub_nc = summary[(summary['n_components'] == nc) &
+                         (summary['effect_size'] == 0.4) &
+                         (summary['severity'] == 'Moderate') &
+                         (summary['preprocessing'] == 'log+scaled')]
+        agg = sub_nc.set_index('norm_method').reindex(norm_methods)
+
+        for col_idx, (tcol, tlab) in enumerate(zip(test_cols, test_labels)):
+            ax = axes[row_idx, col_idx]
+            x_pos = np.arange(len(norm_methods))
+            bar_colors = [method_palette[m] for m in norm_methods]
+            display_labels = [norm_display.get(m, m) for m in norm_methods]
+            ax.bar(x_pos, agg[tcol].values, color=bar_colors,
+                   edgecolor='black', linewidth=0.5)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(display_labels, rotation=45, ha='right')
+            ax.set_ylabel('Power')
+            ax.set_ylim(0, 1.05)
+            ax.set_title(f'n_components={nc} — {tlab}',
+                         fontweight='bold', fontsize=10)
+
+    fig.suptitle('Figure E25: PCA Centroid — Effect of Number of Components\n'
+                 '(Effect size = 0.4, Moderate dilution, log+scaled '
+                 'preprocessing)',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'figE25_pca_centroid_ncomponents.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'figE25_pca_centroid_ncomponents.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure E25b: 4×3 — effect size × dilution severity interaction
+    # Rows = effect sizes, cols = severities
+    # log+scaled preprocessing, n_components=2, bars = 3 tests
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(4, 3, figsize=(20, 20))
+    sub_hot = summary[(summary['n_components'] == 2) &
+                      (summary['preprocessing'] == 'log+scaled')].copy()
+
+    for row_idx, es in enumerate(effect_sizes):
+        for col_idx, sev in enumerate(severities):
+            ax = axes[row_idx, col_idx]
+            sub_cell = sub_hot[(sub_hot['effect_size'] == es) &
+                               (sub_hot['severity'] == sev)]
+            sub_cell = sub_cell.set_index('norm_method').reindex(norm_methods)
+
+            x_pos = np.arange(len(norm_methods))
+            bar_colors = [method_palette[m] for m in norm_methods]
+            display_labels = [norm_display.get(m, m) for m in norm_methods]
+
+            for ti, (tcol, tlab, hatch) in enumerate(zip(
+                    test_cols, test_labels, [None, '//', '..'])):
+                offset = (ti - 1) * 0.25
+                vals = sub_cell[tcol].values
+                ax.bar(x_pos + offset, vals, 0.24, color=bar_colors,
+                       edgecolor='black', linewidth=0.5, hatch=hatch,
+                       label=tlab if row_idx == 0 and col_idx == 0 else None,
+                       alpha=0.85)
+
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(display_labels, rotation=45, ha='right',
+                               fontsize=8)
+            ax.set_ylabel('Power')
+            ax.set_ylim(0, 1.05)
+            ax.set_title(f'ES={es}, {sev} dilution',
+                         fontweight='bold', fontsize=10)
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(fontsize=7, loc='upper left')
+
+    fig.suptitle('Figure E25b: Effect Size × Dilution Severity Interaction\n'
+                 '(log+scaled preprocessing, n_components=2, bars = 3 tests)',
+                 fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'figE25b_pca_centroid_es_severity.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'figE25b_pca_centroid_es_severity.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    print(f"  Saved: fig11_pca_centroid_comparison.pdf")
+    print(f"  Saved: figE24_pca_centroid_detail.pdf")
+    print(f"  Saved: figE25_pca_centroid_ncomponents.pdf")
+    print(f"  Saved: figE25b_pca_centroid_es_severity.pdf")
+    print(f"  Saved: pca_centroid_results.csv, pca_centroid_summary.csv")
+    return df
+
+
+def _analysis_18_pool_init():
+    """Limit BLAS threads in worker processes."""
+    import os
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OMP_NUM_THREADS'] = '1'
+    try:
+        import ctypes
+        libopenblas = ctypes.CDLL("libopenblas64_.dylib")
+        libopenblas.openblas_set_num_threads(1)
+    except (OSError, AttributeError):
+        pass
+
+
+def _analysis_18_worker(args):
+    """Worker for one (rge, rac, norm, effect_size, rep) in analysis 18."""
+    rge, rac, norm_method, effect_size, rep = args
+    from sklearn.preprocessing import StandardScaler as _SS
+    from sklearn.decomposition import PCA as _PCA
+
+    results = []
+    try:
+        np.random.seed(42 + rep * 100 + hash((rge, rac, effect_size)) % 1000)
+        dataset = generate_dataset(
+            n_subjects=30, n_biomarkers=50, n_groups=2,
+            correlation_type='moderate', effect_size=effect_size,
+            distribution='lognormal', lod_percentile=0.1,
+            lod_handling='substitute',
+            dilution_alpha=5.0, dilution_beta=5.0,
+            ref_group_effect=rge, ref_analyte_corr=rac,
+            positive_fraction=1.0,  # all biomarkers elevated in disease
+        )
+        X_obs = dataset['X_obs']
+        y = dataset['y']
+
+        X_norm = normalize_data(X_obs, norm_method)
+
+        # Log+scaled preprocessing (fair comparison for all including CLR)
+        X_prep = X_norm.copy()
+        if norm_method != 'clr':
+            X_prep = np.maximum(X_prep, 0) + 1e-5
+            X_prep = np.log(X_prep)
+        X_prep = _SS().fit_transform(X_prep)
+
+        nc = min(2, X_prep.shape[0], X_prep.shape[1])
+        pca = _PCA(n_components=nc)
+        X_pca = pca.fit_transform(X_prep)
+        var_explained = float(pca.explained_variance_ratio_.sum())
+
+        hot = hotellings_t2_test(X_pca, y, n_permutations=199)
+        D = compute_distance_matrix(X_pca, 'euclidean')
+        perm = permanova_r2(D, y, n_permutations=199)
+        cdist = centroid_distance_test(X_pca, y, n_permutations=199)
+
+        results.append({
+            'ref_group_effect': rge,
+            'ref_analyte_corr': rac,
+            'norm_method': norm_method,
+            'effect_size': effect_size,
+            'replication': rep,
+            'variance_explained': var_explained,
+            'hotelling_t2': hot['t2_statistic'],
+            'hotelling_perm_p': hot['permutation_p'],
+            'hotelling_reject': int(hot['permutation_p'] < 0.05),
+            'permanova_r2': perm['r2'],
+            'permanova_p': perm['p_value'],
+            'permanova_reject': int(perm['p_value'] < 0.05),
+            'centroid_distance': cdist['centroid_distance'],
+            'centroid_distance_p': cdist['permutation_p'],
+            'centroid_distance_reject': int(cdist['permutation_p'] < 0.05),
+        })
+    except Exception as e:
+        print(f"  Warning: rep {rep} failed "
+              f"(rge={rge}/rac={rac}/es={effect_size}/{norm_method}): {e}")
+    return results
+
+
+def analysis_18_pca_centroid_reference():
+    """PCA centroid methods under correlated reference normalization
+    (Figure 12, Figure E30, Figure E30b).
+
+    Tests how normalizing to a reference biomarker (e.g. total protein)
+    that is itself correlated with disease biomarkers and elevated in
+    one group distorts PCA group separation. Sweeps effect sizes to find
+    the informative range. Compares reference normalization against
+    compositional methods (CLR, PQN) that are immune to single-biomarker
+    bias.
+    """
+    print("\n" + "=" * 60)
+    print("Analysis 18: PCA Centroid × Correlated Reference")
+    print("=" * 60)
+
+    # ref_group_effect now scales relative to effect_size:
+    # rge=1.0 → reference elevated same amount as analytes (max cancellation)
+    # rge=0.0 → no reference elevation; rge=5.0 → reference 5× analyte effect
+    ref_group_effects = [0.0, 0.5, 1.0, 2.0, 5.0]
+    ref_analyte_corrs = [0.0, 0.3, 0.5, 0.7, 0.9]
+    norm_methods = ['none', 'total_sum', 'pqn', 'clr', 'median',
+                    'quantile', 'reference']
+    effect_sizes = [0.1, 0.2, 0.3, 0.5]
+    n_replications = 30
+
+    tasks = [(rge, rac, nm, es, rep)
+             for rge in ref_group_effects
+             for rac in ref_analyte_corrs
+             for nm in norm_methods
+             for es in effect_sizes
+             for rep in range(n_replications)]
+
+    n_workers = min(mp.cpu_count(), 8)
+    print(f"  Running {len(tasks)} tasks across {n_workers} workers...")
+
+    ctx = mp.get_context('fork')
+    with ctx.Pool(n_workers, initializer=_analysis_18_pool_init) as pool:
+        nested_results = pool.map(_analysis_18_worker, tasks, chunksize=10)
+
+    all_results = [r for batch in nested_results for r in batch]
+    df = pd.DataFrame(all_results)
+    df.to_csv(RESULTS_DIR / 'pca_centroid_reference_results.csv', index=False)
+    print(f"  Total rows: {len(df)}")
+
+    # Summary
+    summary = df.groupby(
+        ['ref_group_effect', 'ref_analyte_corr', 'norm_method',
+         'effect_size']).agg(
+        hotelling_power=('hotelling_reject', 'mean'),
+        permanova_power=('permanova_reject', 'mean'),
+        centroid_power=('centroid_distance_reject', 'mean'),
+        hotelling_t2_mean=('hotelling_t2', 'mean'),
+        permanova_r2_mean=('permanova_r2', 'mean'),
+        centroid_dist_mean=('centroid_distance', 'mean'),
+        variance_explained_mean=('variance_explained', 'mean'),
+    ).round(4).reset_index()
+    summary.to_csv(RESULTS_DIR / 'pca_centroid_reference_summary.csv',
+                   index=False)
+
+    # ------------------------------------------------------------------
+    # Common definitions
+    # ------------------------------------------------------------------
+    test_cols = ['hotelling_power', 'permanova_power', 'centroid_power']
+    test_labels = ["Hotelling's T²", 'PERMANOVA', 'Centroid Distance']
+    method_palette = dict(zip(norm_methods, CB_PALETTE[:len(norm_methods)]))
+
+    spotlight_methods = ['reference', 'clr', 'pqn']
+    spotlight_labels = ['Reference (Total Protein)',
+                        'CLR (log-ratio)', 'PQN']
+
+    # ------------------------------------------------------------------
+    # Figure 12: 3×4 main manuscript figure
+    # Rows = spotlight normalization methods (Reference, CLR, PQN)
+    # Cols = effect sizes (0.2, 0.4, 0.6, 0.8)
+    # Each cell: heatmap of Hotelling's T² power (rge × rac)
+    # Shows Reference losing power at small ES + high rac/rge while
+    # CLR and PQN remain robust.
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(3, 4, figsize=(24, 16))
+    panel_letters = [
+        ['A', 'B', 'C', 'D'],
+        ['E', 'F', 'G', 'H'],
+        ['I', 'J', 'K', 'L'],
+    ]
+
+    for row_idx, (meth, mlab) in enumerate(zip(spotlight_methods,
+                                                spotlight_labels)):
+        for col_idx, es in enumerate(effect_sizes):
+            ax = axes[row_idx, col_idx]
+            sub = summary[(summary['norm_method'] == meth) &
+                          (summary['effect_size'] == es)]
+            hm = sub.pivot_table(index='ref_group_effect',
+                                 columns='ref_analyte_corr',
+                                 values='hotelling_power')
+            sns.heatmap(hm, annot=True, fmt='.2f', cmap='viridis',
+                        vmin=0, vmax=1, ax=ax, linewidths=0.5,
+                        cbar_kws={'label': 'Power'})
+            letter = panel_letters[row_idx][col_idx]
+            ax.set_title(f'({letter}) {mlab}\nEffect size = {es}',
+                         fontweight='bold', fontsize=10)
+            ax.set_xlabel('$\\rho_{ref}$' if row_idx == 2 else '')
+            ax.set_ylabel('$\\delta_{ref}$ (× ES)' if col_idx == 0 else '')
+
+    fig.suptitle(
+        'Figure 12: PCA Centroid Separation Under Correlated Reference '
+        'Normalization\n(Hotelling\'s T² power; n=30, p=50, '
+        'log+scaled, n_components=2; '
+        '$\\delta_{ref}$ = reference elevation as multiple of ES)',
+        fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'fig12_pca_centroid_reference.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'fig12_pca_centroid_reference.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure E30: 4×3 — effect size × test method interaction
+    # Rows = effect sizes, cols = test methods
+    # Lines = norm methods (reference dashed), x = ref_group_effect
+    # Fixed at rac=0.7 (high correlation with reference)
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(4, 3, figsize=(20, 20))
+
+    sub_rac = summary[summary['ref_analyte_corr'] == 0.7]
+
+    for row_idx, es in enumerate(effect_sizes):
+        sub_es = sub_rac[sub_rac['effect_size'] == es]
+        for col_idx, (tcol, tlab) in enumerate(zip(test_cols, test_labels)):
+            ax = axes[row_idx, col_idx]
+            for nm in norm_methods:
+                sub_nm = sub_es[sub_es['norm_method'] == nm].sort_values(
+                    'ref_group_effect')
+                if len(sub_nm) == 0:
+                    continue
+                style = '--' if nm == 'reference' else '-'
+                lw = 2.5 if nm == 'reference' else 1.2
+                ax.plot(sub_nm['ref_group_effect'], sub_nm[tcol],
+                        f'o{style}', color=method_palette[nm],
+                        label=nm, linewidth=lw, markersize=4)
+
+            ax.set_xlabel('$\\delta_{ref}$ (× ES)')
+            ax.set_ylabel('Power')
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_title(f'ES = {es} — {tlab}',
+                         fontweight='bold', fontsize=10)
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(fontsize=6, loc='best')
+
+    fig.suptitle(
+        'Figure E30: PCA Centroid × Correlated Reference — '
+        'Effect Size Interaction\n'
+        '($\\rho_{ref}$ = 0.7; log+scaled preprocessing, n_components=2)',
+        fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'figE30_pca_centroid_reference_detail.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'figE30_pca_centroid_reference_detail.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure E30b: 5×3 — per-rac detail at effect_size=0.4
+    # Rows = ref_analyte_corr values, cols = test methods
+    # Lines = normalization methods, x = ref_group_effect
+    # Effect size = 0.4 chosen as the most informative range
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(5, 3, figsize=(20, 25))
+
+    sub_es04 = summary[summary['effect_size'] == 0.2]
+
+    for row_idx, rac_val in enumerate(ref_analyte_corrs):
+        sub_rac_v = sub_es04[sub_es04['ref_analyte_corr'] == rac_val]
+        for col_idx, (tcol, tlab) in enumerate(zip(test_cols, test_labels)):
+            ax = axes[row_idx, col_idx]
+            for nm in norm_methods:
+                sub_nm = sub_rac_v[sub_rac_v['norm_method'] == nm].sort_values(
+                    'ref_group_effect')
+                if len(sub_nm) == 0:
+                    continue
+                style = '--' if nm == 'reference' else '-'
+                lw = 2.5 if nm == 'reference' else 1.2
+                ax.plot(sub_nm['ref_group_effect'], sub_nm[tcol],
+                        f'o{style}', color=method_palette[nm],
+                        label=nm, linewidth=lw, markersize=4)
+
+            ax.set_xlabel('$\\delta_{ref}$ (× ES)')
+            ax.set_ylabel('Power')
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_title(f'$\\rho_{{ref}}$ = {rac_val} — {tlab}',
+                         fontweight='bold', fontsize=9)
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(fontsize=6, loc='best')
+
+    fig.suptitle(
+        'Figure E30b: PCA Centroid × Correlated Reference — '
+        'Per-Correlation Detail\n'
+        '(Effect size = 0.2; log+scaled preprocessing, n_components=2)',
+        fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    fig.savefig(FIGURES_DIR / 'figE30b_pca_centroid_reference_corr.pdf',
+                format='pdf', bbox_inches='tight')
+    fig.savefig(FIGURES_DIR / 'figE30b_pca_centroid_reference_corr.png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    print(f"  Saved: fig12_pca_centroid_reference.pdf")
+    print(f"  Saved: figE30_pca_centroid_reference_detail.pdf")
+    print(f"  Saved: figE30b_pca_centroid_reference_corr.pdf")
+    print(f"  Saved: pca_centroid_reference_results.csv, "
+          f"pca_centroid_reference_summary.csv")
+    return df
+
+
 def main():
     """Run all analyses."""
     print("=" * 60)
@@ -2240,6 +2911,12 @@ def main():
 
     # Correlated reference biomarker (16)
     corref_df = analysis_16_correlated_reference()
+
+    # PCA centroid comparison methods (17)
+    centroid_df = analysis_17_pca_centroid_comparison()
+
+    # PCA centroid × correlated reference (18)
+    centroid_ref_df = analysis_18_pca_centroid_reference()
 
     elapsed = time.time() - start
     print("\n" + "=" * 60)

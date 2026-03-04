@@ -30,6 +30,7 @@ from biomarker_dilution_sim import (
     normalize_data, centered_log_ratio,
     multiple_testing_correction,
     compute_distance_matrix, permanova_r2,
+    pca_centroid_analysis,
 )
 
 # Output directories
@@ -781,6 +782,291 @@ def plot_log_comparison_stratified(normalized, log_variants, y, analyte_names,
     return strat_df
 
 
+def pca_centroid_comparison_realdata(normalized, y, methods_ordered,
+                                     n_components=2, n_permutations=999):
+    """Run PCA centroid analysis across normalizations × preprocessing configs.
+
+    Parameters
+    ----------
+    normalized : dict
+        {method_name: X_normalized} from apply_normalizations().
+    y : np.ndarray
+        Binary group labels.
+    methods_ordered : list
+        Normalization method names to iterate over.
+    n_components : int
+        Number of PCA components.
+    n_permutations : int
+        Number of permutations for all tests.
+
+    Returns
+    -------
+    pd.DataFrame with one row per norm_method × preprocessing combination.
+    """
+    preproc_configs = [
+        ('raw',        False, False),
+        ('log',        True,  False),
+        ('scaled',     False, True),
+        ('log+scaled', True,  True),
+    ]
+
+    rows = []
+    for method_name in methods_ordered:
+        X_norm = normalized[method_name]
+        for preproc_label, do_log, do_scale in preproc_configs:
+            X_prep = prepare_pca_data(X_norm, method_name,
+                                      log_transform=do_log, scale=do_scale)
+            result = pca_centroid_analysis(
+                X_prep, y, n_components=n_components,
+                n_permutations=n_permutations, scale=False)
+            result['norm_method'] = method_name
+            result['preprocessing'] = preproc_label
+            rows.append(result)
+
+    return pd.DataFrame(rows)
+
+
+def plot_pca_centroid_heatmap(centroid_df, fig_path, title_label):
+    """1×3 heatmap: one panel per test method, colored by -log10(p).
+
+    Parameters
+    ----------
+    centroid_df : pd.DataFrame
+        Output of pca_centroid_comparison_realdata().
+    fig_path : str or Path
+        Output path (without extension).
+    title_label : str
+        Title prefix for the figure.
+    """
+    test_specs = [
+        ('hotelling_permutation_p', "Hotelling's T² (perm)"),
+        ('permanova_p',             'PERMANOVA'),
+        ('centroid_distance_p',     'Centroid Distance'),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+
+    for col_idx, (pcol, tlab) in enumerate(test_specs):
+        ax = axes[col_idx]
+        df_plot = centroid_df.copy()
+        df_plot['neglog10p'] = -np.log10(df_plot[pcol].clip(lower=1e-10))
+
+        pivot = df_plot.pivot_table(
+            index='norm_method', columns='preprocessing',
+            values='neglog10p', aggfunc='first')
+
+        # Reorder
+        norm_order = [m for m in ['none', 'total_sum', 'pqn', 'clr',
+                                   'median', 'quantile', 'protein_corrected']
+                      if m in pivot.index]
+        preproc_order = [p for p in ['raw', 'log', 'scaled', 'log+scaled']
+                         if p in pivot.columns]
+        pivot = pivot.reindex(index=norm_order, columns=preproc_order)
+
+        # Annotation: value + significance star
+        annot_matrix = pivot.copy().astype(str)
+        p_pivot = df_plot.pivot_table(
+            index='norm_method', columns='preprocessing',
+            values=pcol, aggfunc='first')
+        p_pivot = p_pivot.reindex(index=norm_order, columns=preproc_order)
+        for i in range(len(norm_order)):
+            for j in range(len(preproc_order)):
+                val = pivot.iloc[i, j]
+                pval = p_pivot.iloc[i, j]
+                if np.isnan(val):
+                    annot_matrix.iloc[i, j] = ''
+                else:
+                    star = '***' if pval < 0.001 else ('**' if pval < 0.01
+                           else ('*' if pval < 0.05 else ''))
+                    annot_matrix.iloc[i, j] = f'{val:.1f}{star}'
+
+        sns.heatmap(pivot, annot=annot_matrix, fmt='', cmap='viridis',
+                    ax=ax, linewidths=0.5,
+                    cbar_kws={'label': '$-\\log_{10}(p)$'})
+        sig_line = -np.log10(0.05)
+        ax.set_title(f'{tlab}\n(dashed = p=0.05: {sig_line:.1f})',
+                     fontweight='bold', fontsize=10)
+        if col_idx > 0:
+            ax.set_ylabel('')
+
+    fig.suptitle(f'Figure {title_label}',
+                 fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    fig.savefig(str(fig_path) + '.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(str(fig_path) + '.png', bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_pca_with_centroids_and_ellipses(normalized, y, methods_ordered,
+                                          fig_path, title_label,
+                                          group_labels=('Group 0', 'Group 1'),
+                                          group_colors=('#0072B2', '#D55E00')):
+    """2×N PCA scatter grid with group centroids and 95% confidence ellipses.
+
+    Row 0: raw (no log, no scale).  Row 1: log+scaled.
+    Columns: normalization methods.
+
+    Parameters
+    ----------
+    normalized : dict
+        {method_name: X_normalized}.
+    y : np.ndarray
+        Binary group labels.
+    methods_ordered : list
+        Normalization methods.
+    fig_path : str or Path
+        Output path without extension.
+    title_label : str
+        Figure title prefix.
+    group_labels : tuple
+        Display names for the two groups.
+    group_colors : tuple
+        Colors for the two groups.
+    """
+    from matplotlib.patches import Ellipse
+
+    n_methods = len(methods_ordered)
+    fig, axes = plt.subplots(2, n_methods, figsize=(5 * n_methods, 10))
+    if n_methods == 1:
+        axes = axes.reshape(2, 1)
+
+    preproc_configs = [
+        ('Raw',        False, False),
+        ('Log+Scaled', True,  True),
+    ]
+
+    for row_idx, (preproc_label, do_log, do_scale) in enumerate(preproc_configs):
+        for col_idx, method_name in enumerate(methods_ordered):
+            ax = axes[row_idx, col_idx]
+            X_prep = prepare_pca_data(normalized[method_name], method_name,
+                                      log_transform=do_log, scale=do_scale)
+            pca = PCA(n_components=2)
+            X_pca = pca.fit_transform(X_prep)
+
+            groups = np.unique(y)
+            for g, label, color in zip(groups, group_labels, group_colors):
+                mask = y == g
+                ax.scatter(X_pca[mask, 0], X_pca[mask, 1], c=color,
+                           alpha=0.6, s=40, edgecolors='none', label=label)
+
+                # Centroid
+                centroid = X_pca[mask].mean(axis=0)
+                ax.scatter(centroid[0], centroid[1], c=color, marker='X',
+                           s=150, edgecolors='black', linewidths=1.5,
+                           zorder=5)
+
+                # 95% confidence ellipse via eigendecomposition
+                if mask.sum() >= 3:
+                    cov_matrix = np.cov(X_pca[mask], rowvar=False)
+                    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+                    # Sort descending
+                    order = eigenvalues.argsort()[::-1]
+                    eigenvalues = eigenvalues[order]
+                    eigenvectors = eigenvectors[:, order]
+
+                    # Chi-squared scaling for 95% confidence (2 DOF)
+                    from scipy.stats import chi2
+                    chi2_val = chi2.ppf(0.95, 2)
+                    width = 2 * np.sqrt(chi2_val * max(eigenvalues[0], 0))
+                    height = 2 * np.sqrt(chi2_val * max(eigenvalues[1], 0))
+
+                    angle = np.degrees(np.arctan2(eigenvectors[1, 0],
+                                                   eigenvectors[0, 0]))
+                    ellipse = Ellipse(xy=centroid, width=width, height=height,
+                                      angle=angle, facecolor=color,
+                                      alpha=0.15, edgecolor=color,
+                                      linewidth=1.5, linestyle='--')
+                    ax.add_patch(ellipse)
+
+            ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+            ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+            ax.set_title(f'{method_name}: {preproc_label}',
+                         fontweight='bold', fontsize=10)
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(fontsize=7)
+
+    fig.suptitle(f'Figure {title_label}',
+                 fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    fig.savefig(str(fig_path) + '.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(str(fig_path) + '.png', bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_pca_centroid_heatmap_comparison(balf_df, blood_df, fig_path,
+                                          title_label):
+    """Side-by-side BALF vs Blood PCA centroid heatmap comparison.
+
+    Parameters
+    ----------
+    balf_df : pd.DataFrame
+        PCA centroid results for BALF.
+    blood_df : pd.DataFrame
+        PCA centroid results for Blood.
+    fig_path : str or Path
+        Output path without extension.
+    title_label : str
+        Figure title prefix.
+    """
+    test_specs = [
+        ('hotelling_permutation_p', "Hotelling's T²"),
+        ('permanova_p',             'PERMANOVA'),
+        ('centroid_distance_p',     'Centroid Distance'),
+    ]
+
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+
+    for row_idx, (data_df, tissue_label) in enumerate(
+            [(balf_df, 'BALF'), (blood_df, 'Blood')]):
+        for col_idx, (pcol, tlab) in enumerate(test_specs):
+            ax = axes[row_idx, col_idx]
+            df_plot = data_df.copy()
+            df_plot['neglog10p'] = -np.log10(df_plot[pcol].clip(lower=1e-10))
+
+            pivot = df_plot.pivot_table(
+                index='norm_method', columns='preprocessing',
+                values='neglog10p', aggfunc='first')
+
+            norm_order = [m for m in ['none', 'total_sum', 'pqn', 'clr',
+                                       'median', 'quantile']
+                          if m in pivot.index]
+            preproc_order = [p for p in ['raw', 'log', 'scaled', 'log+scaled']
+                             if p in pivot.columns]
+            pivot = pivot.reindex(index=norm_order, columns=preproc_order)
+
+            # Annotation with stars
+            annot_matrix = pivot.copy().astype(str)
+            p_pivot = df_plot.pivot_table(
+                index='norm_method', columns='preprocessing',
+                values=pcol, aggfunc='first')
+            p_pivot = p_pivot.reindex(index=norm_order, columns=preproc_order)
+            for i in range(len(norm_order)):
+                for j in range(len(preproc_order)):
+                    val = pivot.iloc[i, j]
+                    pval = p_pivot.iloc[i, j]
+                    if np.isnan(val):
+                        annot_matrix.iloc[i, j] = ''
+                    else:
+                        star = '***' if pval < 0.001 else ('**' if pval < 0.01
+                               else ('*' if pval < 0.05 else ''))
+                        annot_matrix.iloc[i, j] = f'{val:.1f}{star}'
+
+            sns.heatmap(pivot, annot=annot_matrix, fmt='', cmap='viridis',
+                        ax=ax, linewidths=0.5,
+                        cbar_kws={'label': '$-\\log_{10}(p)$'})
+            ax.set_title(f'{tissue_label}: {tlab}',
+                         fontweight='bold', fontsize=10)
+            if col_idx > 0:
+                ax.set_ylabel('')
+
+    fig.suptitle(f'Figure {title_label}',
+                 fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    fig.savefig(str(fig_path) + '.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(str(fig_path) + '.png', bbox_inches='tight')
+    plt.close(fig)
+
+
 def run_picflu_reanalysis():
     """Main reanalysis pipeline."""
     print("=" * 60)
@@ -1147,6 +1433,35 @@ def run_picflu_reanalysis():
         FIGURES_DIR / 'figE20b_picflu_log_stratified',
         'E20b: PICFLU Log Comparison (by Analyte Distribution)')
     print("  Saved: figE20b_picflu_log_stratified.pdf")
+
+    # --- PCA Centroid Comparison ---
+    print("\n--- PCA Centroid Comparison ---")
+    picflu_centroid_df = pca_centroid_comparison_realdata(
+        normalized, y_complete, methods_ordered,
+        n_components=2, n_permutations=999)
+    picflu_centroid_df.to_csv(
+        RESULTS_DIR / 'picflu_pca_centroid_results.csv', index=False)
+    print(f"  Computed {len(picflu_centroid_df)} norm×preprocessing combinations")
+
+    plot_pca_centroid_heatmap(
+        picflu_centroid_df,
+        FIGURES_DIR / 'figE26_picflu_pca_centroid',
+        'E26: PICFLU PCA Centroid Comparison')
+    print("  Saved: figE26_picflu_pca_centroid.pdf")
+
+    plot_pca_with_centroids_and_ellipses(
+        normalized, y_complete, methods_ordered,
+        FIGURES_DIR / 'figE27_picflu_pca_ellipses',
+        'E27: PICFLU PCA with Centroids and 95% Confidence Ellipses',
+        group_labels=('No PrAHRF/Death', 'PrAHRF/Death'))
+    print("  Saved: figE27_picflu_pca_ellipses.pdf")
+
+    # Best centroid summary
+    best_centroid = picflu_centroid_df.loc[
+        picflu_centroid_df['hotelling_permutation_p'].idxmin()]
+    print(f"  Best Hotelling's T²: {best_centroid['norm_method']}/"
+          f"{best_centroid['preprocessing']} "
+          f"(p={best_centroid['hotelling_permutation_p']:.4f})")
 
     # --- Total Protein as dilution indicator ---
     print("\n--- Total Protein as Dilution Indicator ---")
@@ -1801,6 +2116,34 @@ def run_juss_reanalysis():
         'E21b: Juss Log Comparison (by Analyte Distribution)')
     print("  Saved: figE21b_juss_log_stratified.pdf")
 
+    # --- BALF PCA Centroid Comparison ---
+    print("\n--- BALF PCA Centroid Comparison ---")
+    juss_balf_centroid_df = pca_centroid_comparison_realdata(
+        normalized, y, methods_ordered,
+        n_components=2, n_permutations=999)
+    juss_balf_centroid_df.to_csv(
+        RESULTS_DIR / 'juss_pca_centroid_results_balf.csv', index=False)
+    print(f"  Computed {len(juss_balf_centroid_df)} norm×preprocessing combinations")
+
+    plot_pca_centroid_heatmap(
+        juss_balf_centroid_df,
+        FIGURES_DIR / 'figE28_juss_pca_centroid',
+        'E28: Juss BALF PCA Centroid Comparison')
+    print("  Saved: figE28_juss_pca_centroid.pdf")
+
+    plot_pca_with_centroids_and_ellipses(
+        normalized, y, methods_ordered,
+        FIGURES_DIR / 'figE29_juss_pca_ellipses',
+        'E29: Juss BALF PCA with Centroids and 95% Confidence Ellipses',
+        group_labels=('Control', 'ARDS'))
+    print("  Saved: figE29_juss_pca_ellipses.pdf")
+
+    best_balf_centroid = juss_balf_centroid_df.loc[
+        juss_balf_centroid_df['hotelling_permutation_p'].idxmin()]
+    print(f"  Best BALF Hotelling's T²: {best_balf_centroid['norm_method']}/"
+          f"{best_balf_centroid['preprocessing']} "
+          f"(p={best_balf_centroid['hotelling_permutation_p']:.4f})")
+
     # === Figure E16: Protein correction comparison (1×3) ===
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
@@ -1931,6 +2274,28 @@ def run_juss_reanalysis():
             juss_blood_distance_df['permanova_r2'].idxmax()]
         print(f"  Best Blood: {best['norm_method']}/{best['distance_metric']} "
               f"R²={best['permanova_r2']:.3f} (p={best['permanova_p']:.3f})")
+
+    # Blood PCA Centroid Comparison
+    print("\n--- Blood PCA Centroid Comparison ---")
+    juss_blood_centroid_df = pca_centroid_comparison_realdata(
+        blood_normalized, y_blood, blood_methods,
+        n_components=2, n_permutations=999)
+    juss_blood_centroid_df.to_csv(
+        RESULTS_DIR / 'juss_pca_centroid_results_blood.csv', index=False)
+    print(f"  Computed {len(juss_blood_centroid_df)} norm×preprocessing combinations")
+
+    best_blood_centroid = juss_blood_centroid_df.loc[
+        juss_blood_centroid_df['hotelling_permutation_p'].idxmin()]
+    print(f"  Best Blood Hotelling's T²: {best_blood_centroid['norm_method']}/"
+          f"{best_blood_centroid['preprocessing']} "
+          f"(p={best_blood_centroid['hotelling_permutation_p']:.4f})")
+
+    # BALF vs Blood comparison heatmap
+    plot_pca_centroid_heatmap_comparison(
+        juss_balf_centroid_df, juss_blood_centroid_df,
+        FIGURES_DIR / 'figE28b_juss_pca_centroid_balf_vs_blood',
+        'E28b: Juss PCA Centroid — BALF vs Blood')
+    print("  Saved: figE28b_juss_pca_centroid_balf_vs_blood.pdf")
 
     # Blood Jaccard matrix
     blood_jaccard = np.zeros((len(blood_methods), len(blood_methods)))
